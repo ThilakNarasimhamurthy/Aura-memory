@@ -10,16 +10,33 @@ from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
-from langchain_anthropic import ChatAnthropic
-from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
-# Use the newer langchain-mongodb package for MongoDB Atlas Vector Search
+# Optional import for Anthropic
+try:
+    from langchain_anthropic import ChatAnthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    ChatAnthropic = None
+
+# Use the production-grade langchain-mongodb package for MongoDB Atlas Vector Search
+# This is the recommended package for MongoDB Atlas Vector Search
 try:
     from langchain_mongodb import MongoDBAtlasVectorSearch
+    _USING_PRODUCTION_PACKAGE = True
 except ImportError:
-    # Fallback to deprecated version if new package is not installed
+    # Fallback to deprecated version only if new package is not installed
+    # NOTE: This should not be used in production - install langchain-mongodb instead
+    import warnings
+    warnings.warn(
+        "Using deprecated langchain_community.vectorstores.MongoDBAtlasVectorSearch. "
+        "Please install langchain-mongodb for production use: pip install langchain-mongodb",
+        DeprecationWarning,
+        stacklevel=2
+    )
     from langchain_community.vectorstores import MongoDBAtlasVectorSearch
+    _USING_PRODUCTION_PACKAGE = False
 from pymongo import MongoClient
 from pymongo.database import Database
 
@@ -67,27 +84,11 @@ class LangChainRAGService:
             openai_api_key=embedding_api_key,
         )
 
-        # Initialize LLM
-        if llm_provider == "openai":
-            llm_api_key = os.getenv("OPENAI_API_KEY")
-            if not llm_api_key:
-                raise ValueError("OPENAI_API_KEY is required for LLM")
-            self.llm = ChatOpenAI(
-                model=llm_model or "gpt-4o-mini",
-                temperature=0.7,
-                openai_api_key=llm_api_key,
-            )
-        elif llm_provider == "anthropic":
-            llm_api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not llm_api_key:
-                raise ValueError("ANTHROPIC_API_KEY is required for LLM")
-            self.llm = ChatAnthropic(
-                model=llm_model or "claude-3-haiku-20240307",
-                temperature=0.7,
-                anthropic_api_key=llm_api_key,
-            )
-        else:
-            raise ValueError(f"Unsupported LLM provider: {llm_provider}")
+        # Initialize LLM lazily (only when needed for RAG queries)
+        # Document storage only needs embeddings, not LLM
+        self._llm = None
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model or ("gpt-4o-mini" if llm_provider == "openai" else "claude-3-haiku-20240307")
 
         # Initialize text splitter
         # Using larger chunk_size to keep customer rows intact (typically 1000-2000 chars)
@@ -133,6 +134,34 @@ class LangChainRAGService:
             print("   4. Index on field 'embedding' with dimension 1536")
             print("   See MONGODB_ATLAS_VECTOR_SEARCH_SETUP.md for setup instructions")
             raise ValueError(f"{error_msg}. Please configure MongoDB Atlas Vector Search for production use.") from e
+
+    @property
+    def llm(self):
+        """Lazy initialization of LLM (only when needed for RAG queries)."""
+        if self._llm is None:
+            if self._llm_provider == "openai":
+                llm_api_key = os.getenv("OPENAI_API_KEY")
+                if not llm_api_key:
+                    raise ValueError("OPENAI_API_KEY is required for LLM. Please set it in your .env file.")
+                self._llm = ChatOpenAI(
+                    model=self._llm_model,
+                    temperature=0.7,
+                    openai_api_key=llm_api_key,
+                )
+            elif self._llm_provider == "anthropic":
+                if not ANTHROPIC_AVAILABLE:
+                    raise ValueError("Anthropic support is not available. Install with: pip install langchain-anthropic")
+                llm_api_key = os.getenv("ANTHROPIC_API_KEY")
+                if not llm_api_key:
+                    raise ValueError("ANTHROPIC_API_KEY is required for LLM. Please set it in your .env file.")
+                self._llm = ChatAnthropic(
+                    model=self._llm_model,
+                    temperature=0.7,
+                    anthropic_api_key=llm_api_key,
+                )
+            else:
+                raise ValueError(f"Unsupported LLM provider: {self._llm_provider}")
+        return self._llm
 
     async def _get_memmachine_client(self) -> MemMachineMCPClient:
         """Get or create MemMachine client."""
@@ -191,13 +220,22 @@ class LangChainRAGService:
                     "storage_mode": "mongodb_atlas_vector_search",
                 }
             except Exception as e:
-                error_msg = f"MongoDB Atlas Vector Search storage failed: {e}"
+                error_msg = str(e)
+                error_type = type(e).__name__
+                
+                # Check for authentication errors
+                if "AuthenticationError" in error_type or "401" in error_msg or "API key" in error_msg.lower() or "OPENAI_API_KEY" in error_msg:
+                    raise ValueError(f"OpenAI API authentication failed: {error_msg}. Please set a valid OPENAI_API_KEY in your .env file.")
+                
+                # Check for other embedding/vector store errors
+                error_msg = f"MongoDB Atlas Vector Search storage failed: {error_msg}"
                 print(f"❌ {error_msg}")
                 print("   This usually means:")
                 print("   1. Vector search index is not configured in MongoDB Atlas")
                 print("   2. Index name is incorrect (should be 'vector_index')")
                 print("   3. Index field mapping is incorrect")
-                raise ValueError(f"{error_msg}. Please configure MongoDB Atlas Vector Search index.") from e
+                print("   4. Or OpenAI API authentication failed")
+                raise ValueError(f"{error_msg}. Please check your configuration.") from e
         else:
             # This should not happen in production if MongoDB Atlas is properly configured
             error_msg = "MongoDB Atlas Vector Search is not initialized. Please check your configuration."
@@ -301,7 +339,12 @@ class LangChainRAGService:
 
                 memories = memory_docs
             except Exception as e:
-                print(f"Warning: Failed to retrieve memories: {e}")
+                # MemMachine is required - log error with setup instructions
+                error_msg = str(e)
+                print(f"ERROR: MemMachine is required but unavailable: {error_msg}")
+                print(f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions.")
+                print(f"Required: MemMachine MCP server must be running at the configured URL.")
+                # Don't fail the request but log clearly that MemMachine is required
 
         return {
             "documents": documents,
@@ -338,6 +381,23 @@ class LangChainRAGService:
         all_docs = context["documents"] + context["memories"]
 
         if not all_docs:
+            # Check if MemMachine retrieval failed
+            memmachine_error = False
+            if include_memories:
+                try:
+                    # Try to get memmachine client to check if it's available
+                    await self._get_memmachine_client()
+                except Exception:
+                    memmachine_error = True
+            
+            if memmachine_error:
+                return {
+                    "query": query,
+                    "answer": "No relevant context found. MemMachine is required but unavailable. Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions.",
+                    "sources": [],
+                    "documents": [],
+                }
+            
             return {
                 "query": query,
                 "answer": "No relevant context found.",
@@ -511,13 +571,9 @@ Provide a natural, conversational response suitable for voice (ElevenLabs TTS):"
             "documents": [
                 {
                     "content": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
-                    "metadata": {
-                        "customer_id": doc.metadata.get("customer_id"),
-                        "name": f"{doc.metadata.get('first_name', '')} {doc.metadata.get('last_name', '')}".strip(),
-                        "email": doc.metadata.get("email"),
-                    },
+                    "metadata": doc.metadata,  # Return full metadata for frontend compatibility
                 }
-                for doc in all_docs[:5]  # Top 5 documents
+                for doc in all_docs[:20]  # Return more documents for frontend display (up to 20)
             ],
             "total_context": context["total_context"],
             "conversation_ready": True,  # Flag for voice system

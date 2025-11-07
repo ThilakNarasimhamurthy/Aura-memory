@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     ELEVENLABS_AVAILABLE,
+    LANGGRAPH_AVAILABLE,
     get_elevenlabs_service,
     get_langchain_rag_service,
     get_langgraph_workflow,
@@ -20,7 +21,6 @@ from app.models.schemas import (
     StoreDocumentsRequest,
 )
 from app.services.langchain_rag_service import LangChainRAGService
-from app.workflows.langgraph_rag_workflow import LangGraphRAGWorkflow
 
 if ELEVENLABS_AVAILABLE:
     from app.services.elevenlabs_service import ElevenLabsService
@@ -46,25 +46,34 @@ async def store_documents(
         )
         return result
     except ValueError as e:
-        if "OPENAI_API_KEY" in str(e) or "API key" in str(e):
+        error_msg = str(e)
+        if "OPENAI_API_KEY" in error_msg or "API key" in error_msg or "AuthenticationError" in error_msg or "401" in error_msg:
             raise HTTPException(
                 status_code=400,
-                detail=f"Configuration error: {str(e)}. Please set OPENAI_API_KEY in your .env file."
+                detail=f"Configuration error: {error_msg}. Please set OPENAI_API_KEY in your .env file."
             )
-        raise HTTPException(status_code=500, detail=f"Failed to store documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to store documents: {error_msg}")
     except Exception as e:
+        error_msg = str(e)
+        error_type = type(e).__name__
+        
+        # Check for authentication errors (OpenAI, etc.)
+        if "AuthenticationError" in error_type or "401" in error_msg or "API key" in error_msg.lower() or "OPENAI_API_KEY" in error_msg:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Authentication error: {error_msg}. Please check your OPENAI_API_KEY in your .env file."
+            )
+        
+        # For other errors, return detailed error message
         import traceback
         error_trace = traceback.format_exc()
-        error_detail = f"Failed to store documents: {str(e)}"
+        error_detail = f"Failed to store documents: {error_msg}"
         print(f"Error details:\n{error_trace}")
-        # Return more detailed error in response
+        # Return more detailed error in response as a string (FastAPI will serialize it)
+        error_message = f"{error_detail}\nType: {error_type}\nDetails: {error_msg}"
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": error_detail,
-                "type": type(e).__name__,
-                "message": str(e)
-            }
+            detail=error_message
         )
 
 
@@ -140,6 +149,9 @@ async def retrieve_context(
 
     This endpoint combines document retrieval from MongoDB vector store
     with memory retrieval from MemMachine.
+    
+    **Note:** MemMachine is required. Ensure the MCP server is running.
+    See MemMachine/QUICK_START.md for setup instructions.
     """
     try:
         result = await rag_service.retrieve_context(
@@ -167,6 +179,15 @@ async def retrieve_context(
             ],
             "total_context": result["total_context"],
         }
+    except ValueError as e:
+        error_msg = str(e)
+        if "not available" in error_msg.lower() or "not found" in error_msg.lower() or "Failed to connect" in error_msg:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MemMachine is required but unavailable: {error_msg}. "
+                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+            )
+        raise HTTPException(status_code=400, detail=f"Failed to retrieve context: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve context: {str(e)}")
 
@@ -181,8 +202,11 @@ async def rag_query(
 
     This endpoint:
     1. Retrieves relevant documents from MongoDB vector store
-    2. Retrieves relevant memories from MemMachine
+    2. Retrieves relevant memories from MemMachine (required)
     3. Generates an answer using an LLM
+    
+    **Note:** MemMachine is required. Ensure the MCP server is running.
+    See MemMachine/QUICK_START.md for setup instructions.
     """
     try:
         result = await rag_service.rag_query(
@@ -192,6 +216,15 @@ async def rag_query(
             user_id=request.user_id,
         )
         return result
+    except ValueError as e:
+        error_msg = str(e)
+        if "not available" in error_msg.lower() or "not found" in error_msg.lower() or "Failed to connect" in error_msg:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MemMachine is required but unavailable: {error_msg}. "
+                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+            )
+        raise HTTPException(status_code=400, detail=f"Failed to process RAG query: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process RAG query: {str(e)}")
 
@@ -211,10 +244,13 @@ async def campaign_conversation_query(
     
     This endpoint:
     1. Retrieves relevant customer documents (uses higher k for finding active customers)
-    2. Retrieves relevant memories from MemMachine
+    2. Retrieves relevant memories from MemMachine (required)
     3. Generates a conversational answer optimized for voice TTS
     
     Use this endpoint when building voice conversations about campaigns.
+    
+    **Note:** MemMachine is required. Ensure the MCP server is running.
+    See MemMachine/QUICK_START.md for setup instructions.
     """
     try:
         # Allow higher k for finding active customers
@@ -226,6 +262,15 @@ async def campaign_conversation_query(
             user_id=request.user_id,
         )
         return result
+    except ValueError as e:
+        error_msg = str(e)
+        if "not available" in error_msg.lower() or "not found" in error_msg.lower() or "Failed to connect" in error_msg:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MemMachine is required but unavailable: {error_msg}. "
+                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+            )
+        raise HTTPException(status_code=400, detail=f"Failed to process campaign conversation query: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process campaign conversation query: {str(e)}")
 
@@ -293,7 +338,7 @@ async def campaign_conversation_voice(
 @router.post("/query/langgraph", summary="RAG query using LangGraph workflow")
 async def langgraph_rag_query(
     request: LangGraphRAGRequest,
-    workflow: LangGraphRAGWorkflow = Depends(get_langgraph_workflow),
+    workflow = Depends(get_langgraph_workflow),
 ) -> dict[str, Any]:
     """
     Perform a RAG query using LangGraph workflow.
@@ -306,6 +351,12 @@ async def langgraph_rag_query(
 
     LangGraph provides better control flow and state management.
     """
+    if not LANGGRAPH_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="LangGraph is not available. Install it with: pip install langgraph"
+        )
+    
     try:
         result = await workflow.run(
             query=request.query,
@@ -313,6 +364,11 @@ async def langgraph_rag_query(
             user_id=request.user_id,
         )
         return result
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"LangGraph is not available: {str(e)}"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process LangGraph RAG query: {str(e)}")
 

@@ -13,11 +13,74 @@ serve(async (req) => {
   try {
     const body = await req.json();
     const { type = "campaign", targetAudience, campaignGoal, segmentData, period, historicalData, category } = body;
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
+    if (!OPENAI_API_KEY) {
+      throw new Error("OPENAI_API_KEY is not configured. Please set it in your Supabase Edge Function secrets.");
     }
+
+    // Helper function to generate images using OpenAI DALL-E 3
+    const generateImageWithOpenAI = async (prompt: string, quality: "standard" | "hd" = "standard"): Promise<string | null> => {
+      try {
+        console.log("Generating image with DALL-E 3, prompt:", prompt.substring(0, 100) + "...");
+        
+        const response = await fetch("https://api.openai.com/v1/images/generations", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "dall-e-3",
+            prompt: prompt,
+            size: "1024x1792", // Vertical banner format (9:16 aspect ratio) for social media
+            quality: quality, // "standard" or "hd" - HD takes longer but higher quality
+            // Note: DALL-E 3 only generates 1 image at a time, so 'n' parameter is not supported
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { error: { message: errorText } };
+          }
+          
+          console.error("OpenAI DALL-E error:", response.status, errorText);
+          
+          if (response.status === 401) {
+            throw new Error("OpenAI API key is invalid. Please check your OPENAI_API_KEY in Supabase Edge Function secrets.");
+          }
+          if (response.status === 429) {
+            throw new Error("OpenAI rate limit exceeded. Please try again later.");
+          }
+          if (response.status === 400) {
+            const errorMessage = errorData.error?.message || errorText;
+            throw new Error(`Invalid request to DALL-E: ${errorMessage}`);
+          }
+          if (response.status === 500) {
+            throw new Error("OpenAI server error. Please try again later.");
+          }
+          throw new Error(`OpenAI API error (${response.status}): ${errorData.error?.message || errorText}`);
+        }
+
+        const data = await response.json();
+        const imageUrl = data.data?.[0]?.url || null;
+        
+        if (imageUrl) {
+          console.log("Successfully generated image with DALL-E 3");
+        } else {
+          console.error("DALL-E returned no image URL in response:", data);
+        }
+        
+        return imageUrl;
+      } catch (error) {
+        console.error("Error generating image with DALL-E:", error);
+        throw error; // Re-throw to allow caller to handle
+      }
+    };
 
     let systemPrompt, userPrompt;
 
@@ -45,14 +108,14 @@ Base recommendations on: ${historicalData}`;
 
       userPrompt = `Generate ${days} days of ${category}-focused campaign content. Make it compelling and action-oriented.`;
 
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
+          model: "gpt-4o-mini",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
@@ -98,34 +161,23 @@ Base recommendations on: ${historicalData}`;
         campaigns = [];
       }
 
-      // Generate banners for first 3 days
+      // Generate banners for first 3 days using OpenAI DALL-E 3
       for (let i = 0; i < campaigns.length && i < 3; i++) {
         const campaign = campaigns[i];
         try {
-          const bannerResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${LOVABLE_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "google/gemini-2.5-flash-image",
-              messages: [
-                { 
-                  role: "user", 
-                  content: `Create a coffee shop social media banner for ${category}: ${campaign.bannerDescription || campaign.caption}. Style: Modern, clean, professional coffee shop aesthetic with focus on ${category}.`
-                }
-              ],
-              modalities: ["image", "text"]
-            }),
-          });
+          const bannerPrompt = `Create a stunning, professional social media banner for a coffee shop featuring ${category}. 
+          
+Visual elements: ${campaign.bannerDescription || campaign.caption}
+Style: Modern, clean, professional coffee shop aesthetic with warm, inviting atmosphere
+Format: Vertical banner (9:16 aspect ratio) perfect for Instagram Stories and Facebook posts
+Quality: High-resolution, vibrant colors, appetizing food photography style
+Mood: Engaging, eye-catching, premium coffee shop branding
+Colors: Warm coffee tones, creamy textures, inviting ambiance
 
-          if (bannerResponse.ok) {
-            const bannerData = await bannerResponse.json();
-            campaign.banner = bannerData.choices?.[0]?.message?.images?.[0]?.image_url?.url || null;
-          }
+The banner should be visually appealing and immediately capture attention on social media feeds.`;
+          campaign.banner = await generateImageWithOpenAI(bannerPrompt, "standard");
         } catch (error) {
-          console.error(`Failed to generate banner for day ${i}:`, error);
+          console.error(`Failed to generate banner for day ${i + 1}:`, error);
           campaign.banner = null;
         }
       }
@@ -158,14 +210,14 @@ Base recommendations on: ${historicalData}`;
 
       userPrompt = `Generate ${days} days of campaign content. Consider seasonal trends, customer behavior patterns, and engagement history.`;
 
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
+          model: "gpt-4o-mini",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
@@ -212,34 +264,23 @@ Base recommendations on: ${historicalData}`;
         campaigns = [];
       }
 
-      // Generate banners for each day
+      // Generate banners for each day using OpenAI DALL-E 3
       for (let i = 0; i < campaigns.length && i < 3; i++) {
         const campaign = campaigns[i];
         try {
-          const bannerResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${LOVABLE_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "google/gemini-2.5-flash-image",
-              messages: [
-                { 
-                  role: "user", 
-                  content: `Create a coffee shop social media banner: ${campaign.bannerDescription || campaign.caption}. Style: Modern, clean, professional coffee shop aesthetic.`
-                }
-              ],
-              modalities: ["image", "text"]
-            }),
-          });
+          const bannerPrompt = `Create a stunning, professional social media banner for a coffee shop. 
+          
+Visual concept: ${campaign.bannerDescription || campaign.caption}
+Style: Modern, clean, professional coffee shop aesthetic with warm, inviting atmosphere
+Format: Vertical banner (9:16 aspect ratio) perfect for Instagram Stories and Facebook posts
+Quality: High-resolution, vibrant colors, appetizing food photography style
+Mood: Engaging, eye-catching, premium coffee shop branding
+Colors: Warm coffee tones, creamy textures, inviting ambiance
 
-          if (bannerResponse.ok) {
-            const bannerData = await bannerResponse.json();
-            campaign.banner = bannerData.choices?.[0]?.message?.images?.[0]?.image_url?.url || null;
-          }
+The banner should be visually appealing and immediately capture attention on social media feeds.`;
+          campaign.banner = await generateImageWithOpenAI(bannerPrompt, "standard");
         } catch (error) {
-          console.error(`Failed to generate banner for day ${i}:`, error);
+          console.error(`Failed to generate banner for day ${i + 1}:`, error);
           campaign.banner = null;
         }
       }
@@ -251,63 +292,82 @@ Base recommendations on: ${historicalData}`;
     }
 
     if (type === "banner") {
-      systemPrompt = `You are a creative director for a coffee shop. Generate a social media banner concept including:
-1. Visual Description (colors, mood, elements)
-2. Headline Text
-3. Body Copy (short)
-4. Call-to-Action
-5. Optimal Posting Time (day and time)
-6. Platform Recommendation (Instagram/Facebook/Twitter)
-
-Format as JSON.`;
-
-      userPrompt = `Target: ${targetAudience}. ${segmentData}. Goal: ${campaignGoal}. Create a banner concept.`;
+      // Generate banner image directly using OpenAI DALL-E 3
+      const bannerPrompt = `Create a stunning, professional social media banner for a coffee shop. 
       
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${LOVABLE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash-image",
-          messages: [
-            { role: "user", content: `${systemPrompt}\n\n${userPrompt}` }
-          ],
-          modalities: ["image", "text"]
-        }),
-      });
+Target audience: ${targetAudience}
+Campaign context: ${segmentData}
+Campaign goal: ${campaignGoal}
 
-      if (!response.ok) {
-        if (response.status === 429) {
-          return new Response(
-            JSON.stringify({ error: "Rate limits exceeded, please try again later." }),
-            { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
-        if (response.status === 402) {
-          return new Response(
-            JSON.stringify({ error: "Payment required, please add funds to your Lovable AI workspace." }),
-            { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
+Style requirements:
+- Modern, clean, professional coffee shop aesthetic
+- Warm, inviting atmosphere with premium branding
+- Vertical banner format (9:16 aspect ratio) perfect for Instagram Stories and Facebook posts
+- High-resolution, vibrant colors, appetizing food photography style
+- Eye-catching design that immediately captures attention
+- Colors: Warm coffee tones, creamy textures, inviting ambiance
+- Mood: Engaging, premium, visually striking
+
+The banner should be visually appealing and immediately capture attention on social media feeds while conveying the coffee shop's premium brand identity.`;
+      
+      try {
+        console.log("Generating banner with DALL-E 3 for type: banner");
+        const image = await generateImageWithOpenAI(bannerPrompt, "standard");
         
-        const errorText = await response.text();
-        console.error("AI gateway error:", response.status, errorText);
+        if (!image) {
+          return new Response(
+            JSON.stringify({ 
+              error: "Failed to generate banner image with DALL-E. Please check your OpenAI API key and try again." 
+            }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Generate campaign description using OpenAI GPT
+        const campaignResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content: "You are a creative director for a coffee shop. Generate a brief, engaging social media banner description."
+              },
+              {
+                role: "user",
+                content: `Target audience: ${targetAudience}. ${segmentData}. Campaign goal: ${campaignGoal}. Create a brief, compelling banner description (1-2 sentences).`
+              }
+            ],
+            max_tokens: 150,
+          }),
+        });
+
+        let campaign = "AI-generated social media banner created with DALL-E 3";
+        if (campaignResponse.ok) {
+          const campaignData = await campaignResponse.json();
+          campaign = campaignData.choices?.[0]?.message?.content || campaign;
+        }
+
+        console.log("Successfully generated banner with DALL-E 3");
+
         return new Response(
-          JSON.stringify({ error: "AI gateway error" }),
+          JSON.stringify({ campaign, image }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      } catch (error) {
+        console.error("Error generating banner with DALL-E:", error);
+        const errorMessage = error instanceof Error ? error.message : "Failed to generate banner";
+        return new Response(
+          JSON.stringify({ 
+            error: `DALL-E image generation failed: ${errorMessage}. Please ensure OPENAI_API_KEY is correctly configured in Supabase Edge Function secrets.`
+          }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
-
-      const data = await response.json();
-      const campaign = data.choices?.[0]?.message?.content || "Unable to generate banner";
-      const image = data.choices?.[0]?.message?.images?.[0]?.image_url?.url || null;
-
-      return new Response(
-        JSON.stringify({ campaign, image }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
     }
 
     // Default campaign generation
@@ -324,14 +384,14 @@ Keep it practical and actionable for a small coffee shop business.`;
 
 Generate a campaign to achieve this goal: ${campaignGoal}`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${LOVABLE_API_KEY}`,
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
+        model: "gpt-4o-mini",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -346,17 +406,17 @@ Generate a campaign to achieve this goal: ${campaignGoal}`;
           { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
-      if (response.status === 402) {
+      if (response.status === 401) {
         return new Response(
-          JSON.stringify({ error: "Payment required, please add funds to your Lovable AI workspace." }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          JSON.stringify({ error: "OpenAI API key is invalid. Please check your OPENAI_API_KEY configuration." }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
       
       const errorText = await response.text();
-      console.error("AI gateway error:", response.status, errorText);
+      console.error("OpenAI API error:", response.status, errorText);
       return new Response(
-        JSON.stringify({ error: "AI gateway error" }),
+        JSON.stringify({ error: "OpenAI API error" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }

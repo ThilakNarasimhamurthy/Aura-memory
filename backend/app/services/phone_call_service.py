@@ -244,22 +244,26 @@ class PhoneCallService:
         webhook_base = webhook_base or os.getenv("TWILIO_WEBHOOK_URL", "http://localhost:8000")
         response = VoiceResponse()
 
-        if gather_input:
+        if gather_input and webhook_base:
             gather = Gather(
                 input="speech dtmf",
                 timeout=gather_timeout,
                 speech_timeout="auto",
                 action=f"{webhook_base}/phone-call/handle-input",
                 method="POST",
+                num_digits=1,  # Allow single digit for quick responses
             )
             gather.say(script_text, voice="alice", language="en-US")
             response.append(gather)
+            
+            # If no input received, continue anyway
+            response.say("I didn't catch that. Let me continue.", voice="alice", language="en-US")
+            response.redirect(f"{webhook_base}/phone-call/handle-input", method="POST")
         else:
             response.say(script_text, voice="alice", language="en-US")
-
-        # Add a goodbye message
-        response.say("Thank you for your time. Goodbye.", voice="alice", language="en-US")
-        response.hangup()
+            # Add a goodbye message only if ending
+            response.say("Thank you for your time and valuable feedback. Have a great day!", voice="alice", language="en-US")
+            response.hangup()
 
         return str(response)
 

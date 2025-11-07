@@ -21,7 +21,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context for managing resources."""
     # Startup - MongoDB
     async with lifespan_context(app):
-        # Startup - MemMachine client will be initialized on first use
+        # Startup - Check MemMachine availability (MemMachine is required)
+        try:
+            import httpx
+            mcp_url = settings.memmachine_mcp_url
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    f"{mcp_url}/mcp/",
+                    headers={"Accept": "text/event-stream"},
+                    timeout=5.0
+                )
+                if response.status_code in [200, 404]:
+                    print(f"✅ MemMachine MCP server is accessible at {mcp_url}")
+                else:
+                    print(f"⚠️  Warning: MemMachine MCP server at {mcp_url} returned status {response.status_code}")
+                    print(f"   MemMachine is required. Please ensure the server is running correctly.")
+        except httpx.ConnectError:
+            print(f"❌ ERROR: MemMachine MCP server is not accessible at {settings.memmachine_mcp_url}")
+            print(f"   MemMachine is REQUIRED for this application.")
+            print(f"   Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions.")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not verify MemMachine MCP server: {e}")
+            print(f"   MemMachine is required. Please ensure the server is running at {settings.memmachine_mcp_url}")
+        
+        # MemMachine client will be initialized on first use
         yield
         # Shutdown - MemMachine
         await close_memmachine_client()

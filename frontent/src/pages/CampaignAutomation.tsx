@@ -3,17 +3,16 @@ import { Sidebar } from "@/components/dashboard/Sidebar";
 import { TopNav } from "@/components/dashboard/TopNav";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Loader2, Calendar, Clock, Target, Image as ImageIcon, MessageSquare, Sparkles, Volume2, Mic, Play, Download, Phone, PhoneCall, User, CheckCircle, XCircle, Send, Bot } from "lucide-react";
+import { Loader2, Calendar, Clock, Target, Image as ImageIcon, MessageSquare, Sparkles, Play, Download, Phone, PhoneCall, User, CheckCircle, XCircle, Send, Bot, Mail, MailCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-import { ragApi, playAudio, downloadAudio, campaignsApi, customersApi, phoneCallApi, type CustomerDocument, type PhoneCallRequest } from "@/lib/api";
+import { ragApi, playAudio, downloadAudio, campaignsApi, customersApi, phoneCallApi, emailApi, type CustomerDocument, type PhoneCallRequest, type EmailRecipient, type BulkEmailRequest, type CallConversation } from "@/lib/api";
 
 interface DayCampaign {
   day: string;
@@ -31,11 +30,6 @@ export default function CampaignAutomation() {
   const [campaigns7Days, setCampaigns7Days] = useState<DayCampaign[]>([]);
   const [campaigns30Days, setCampaigns30Days] = useState<DayCampaign[]>([]);
   const [festivalCampaigns, setFestivalCampaigns] = useState<DayCampaign[]>([]);
-  const [voiceQuery, setVoiceQuery] = useState("");
-  const [voiceLoading, setVoiceLoading] = useState(false);
-  const [voiceResponse, setVoiceResponse] = useState<string | null>(null);
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  
   // Customer calling state
   const [customers, setCustomers] = useState<Array<CustomerDocument & { customer_id: string }>>([]);
   const [top5Customers, setTop5Customers] = useState<Array<CustomerDocument & { customer_id: string }>>([]);
@@ -50,78 +44,24 @@ export default function CampaignAutomation() {
   const [conversationLog, setConversationLog] = useState<Array<{role: string; content: string}>>([]);
   const [activeCall, setActiveCall] = useState<{callSid: string; status: string; phoneNumber: string} | null>(null);
   const [callStatusInterval, setCallStatusInterval] = useState<NodeJS.Timeout | null>(null);
+  const [callConversation, setCallConversation] = useState<CallConversation | null>(null);
   
   // Chat conversation for campaign generation
   const [chatMessages, setChatMessages] = useState<Array<{role: "user" | "assistant"; content: string; timestamp: Date}>>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [generatedCampaigns, setGeneratedCampaigns] = useState<DayCampaign[]>([]);
+  
+  // Email sending state
+  const [emailRecipients, setEmailRecipients] = useState<EmailRecipient[]>([]);
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [emailLoading, setEmailLoading] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+  const [emailResults, setEmailResults] = useState<{sent: number; failed: number} | null>(null);
   
   const { toast } = useToast();
 
-  const handleVoiceQuery = async () => {
-    if (!voiceQuery.trim()) {
-      toast({
-        title: "Query Required",
-        description: "Please enter a question about campaigns or customers.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setVoiceLoading(true);
-    setVoiceResponse(null);
-    setAudioBlob(null);
-
-    try {
-      // Get text response first
-      const textResponse = await ragApi.campaignQuery({
-        query: voiceQuery,
-        k: 10,
-      });
-      setVoiceResponse(textResponse.answer);
-
-      // Get audio response
-      const audio = await ragApi.campaignVoice({
-        query: voiceQuery,
-        k: 10,
-      });
-      setAudioBlob(audio);
-
-      toast({
-        title: "Voice Response Ready",
-        description: "Click play to hear the response about campaigns and customers.",
-      });
-    } catch (error: any) {
-      console.error("Error with voice query:", error);
-      toast({
-        title: "Voice Query Failed",
-        description: error.message || "Failed to generate voice response. Please try again.",
-        variant: "destructive",
-      });
-    } finally {
-      setVoiceLoading(false);
-    }
-  };
-
-  const playVoiceResponse = async () => {
-    if (audioBlob) {
-      try {
-        await playAudio(audioBlob);
-      } catch (error: any) {
-        toast({
-          title: "Playback Error",
-          description: error.message || "Failed to play audio.",
-          variant: "destructive",
-        });
-      }
-    }
-  };
-
-  const downloadVoiceResponse = () => {
-    if (audioBlob) {
-      downloadAudio(audioBlob, "campaign_voice_response.mp3");
-    }
-  };
 
   // Load customers for calling - prioritize most active in campaigns
   const loadCustomersForCalling = async () => {
@@ -132,7 +72,23 @@ export default function CampaignAutomation() {
         k: 20,
       });
       
-      const customerList = response.documents
+      // Ensure documents array exists - API layer should provide mock data if empty
+      const documents = Array.isArray(response?.documents) ? response.documents : [];
+      
+      // Even if empty, API should have provided mock data, but handle gracefully
+      if (documents.length === 0) {
+        console.warn("No customers found, API should have provided mock data");
+        setCustomers([]);
+        setTop5Customers([]);
+        toast({
+          title: "No Customers Found",
+          description: response?.answer || "No customers with campaign engagement found. Using mock data fallback.",
+          variant: "default",
+        });
+        return;
+      }
+      
+      const customerList = documents
         .map(doc => doc.metadata as CustomerDocument)
         .filter(c => c.customer_id && (c.email || c.phone))
         .map(c => ({ ...c, customer_id: String(c.customer_id || "") }))
@@ -420,6 +376,22 @@ Keep it natural and conversational, suitable for a phone call.`;
           if (status.status === "completed" || status.status === "failed" || status.status === "no-answer") {
             clearInterval(interval);
             setCallStatusInterval(null);
+            
+            // Fetch conversation history if call completed
+            if (status.status === "completed") {
+              try {
+                const conversation = await phoneCallApi.getConversation(result.call_sid);
+                setCallConversation(conversation);
+                setConversationLog(conversation.conversation_history);
+                
+                toast({
+                  title: "Call Completed!",
+                  description: `Conversation recorded. ${conversation.total_exchanges} exchanges captured.`,
+                });
+              } catch (error) {
+                console.error("Error fetching conversation:", error);
+              }
+            }
           }
         } catch (error) {
           console.error("Error checking call status:", error);
@@ -488,6 +460,111 @@ Keep it natural and conversational, suitable for a phone call.`;
     }]);
   }, []);
 
+  // Load customers for email sending
+  const loadCustomersForEmail = async () => {
+    try {
+      const response = await customersApi.findActive(50);
+      
+      // Ensure documents array exists - API layer should provide mock data if empty
+      const documents = Array.isArray(response?.documents) ? response.documents : [];
+      
+      // Even if empty, API should have provided mock data, but handle gracefully
+      if (documents.length === 0) {
+        console.warn("No email customers found, API should have provided mock data");
+        setEmailRecipients([]);
+        toast({
+          title: "No Customers Found",
+          description: response?.answer || "No customers with email addresses found. Using mock data fallback.",
+          variant: "default",
+        });
+        return;
+      }
+      
+      const customerList = documents
+        .map(doc => doc.metadata as CustomerDocument)
+        .filter(c => c.email && c.customer_id)
+        .map(c => ({
+          email: c.email!,
+          customer_id: String(c.customer_id || ""),
+          name: c.first_name && c.last_name ? `${c.first_name} ${c.last_name}` : undefined,
+          personalization: {
+            first_name: c.first_name,
+            last_name: c.last_name,
+            customer_segment: c.customer_segment,
+            favorite_product: c.favorite_product_category,
+          },
+        }));
+      
+      setEmailRecipients(customerList);
+      toast({
+        title: "Customers Loaded",
+        description: `Loaded ${customerList.length} customers with email addresses for bulk sending.`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Error Loading Customers",
+        description: error.message || "Failed to load customers.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Send bulk emails
+  const sendBulkEmails = async () => {
+    if (emailRecipients.length === 0) {
+      toast({
+        title: "No Recipients",
+        description: "Please load customers first or add recipients manually.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!emailSubject.trim() || !emailBody.trim()) {
+      toast({
+        title: "Email Content Required",
+        description: "Please enter both subject and body for the email.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setEmailLoading(true);
+    setEmailSent(false);
+    setEmailResults(null);
+
+    try {
+      const request: BulkEmailRequest = {
+        recipients: emailRecipients,
+        subject: emailSubject,
+        body: emailBody,
+        campaign_name: generatedCampaigns.length > 0 ? `Campaign from Chat - ${new Date().toLocaleDateString()}` : undefined,
+      };
+
+      const result = await emailApi.sendBulk(request);
+      
+      setEmailSent(true);
+      setEmailResults({
+        sent: result.sent_count,
+        failed: result.failed_count,
+      });
+
+      toast({
+        title: "Emails Sent!",
+        description: `Successfully sent ${result.sent_count} emails. ${result.failed_count > 0 ? `${result.failed_count} failed.` : ''}`,
+      });
+    } catch (error: any) {
+      console.error("Error sending emails:", error);
+      toast({
+        title: "Email Sending Failed",
+        description: error.message || "Failed to send emails. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setEmailLoading(false);
+    }
+  };
+
   // Handle chat message for campaign generation
   const handleChatMessage = async () => {
     if (!chatInput.trim() || chatLoading) return;
@@ -505,6 +582,45 @@ Keep it natural and conversational, suitable for a phone call.`;
     setChatMessages(prev => [...prev, newUserMessage]);
 
     try {
+      // Check if user wants to generate campaigns (7 days, 30 days, festival)
+      const lowerMessage = userMessage.toLowerCase();
+      let period: "7days" | "30days" | "festival" | null = null;
+      
+      if (lowerMessage.includes("7 day") || lowerMessage.includes("week")) {
+        period = "7days";
+      } else if (lowerMessage.includes("30 day") || lowerMessage.includes("month")) {
+        period = "30days";
+      } else if (lowerMessage.includes("festival") || lowerMessage.includes("holiday")) {
+        period = "festival";
+      }
+
+      if (period) {
+        // Generate structured campaigns using Supabase function
+        const { data, error } = await supabase.functions.invoke("generate-campaign", {
+          body: {
+            type: "automation",
+            period,
+            historicalData: userMessage,
+          }
+        });
+
+        if (error) throw error;
+
+        const campaigns = data.campaigns || [];
+        setGeneratedCampaigns(campaigns);
+        
+        const assistantMessage = {
+          role: "assistant" as const,
+          content: `I've generated a ${period === "7days" ? "7-day" : period === "30days" ? "30-day" : "festival"} campaign schedule for you! The campaigns are displayed below. You can now send emails to customers or make calls to test campaign effectiveness.`,
+          timestamp: new Date(),
+        };
+        setChatMessages(prev => [...prev, assistantMessage]);
+
+        toast({
+          title: "Campaign Generated!",
+          description: `${campaigns.length} campaigns created. You can now send emails or make calls.`,
+        });
+      } else {
       // Use RAG to generate campaign response
       const response = await ragApi.campaignQuery({
         query: `Generate a marketing campaign based on this request: ${userMessage}. 
@@ -533,11 +649,9 @@ Provide a detailed campaign plan with:
       };
       setChatMessages(prev => [...prev, assistantMessage]);
 
-      // If the response mentions campaigns, try to extract and show campaign cards
-      if (response.answer.toLowerCase().includes("campaign") || response.answer.toLowerCase().includes("day")) {
         toast({
           title: "Campaign Generated",
-          description: "Check the chat for campaign details. You can ask follow-up questions to refine it.",
+          description: "Check the chat for campaign details. You can ask to generate structured campaigns (7 days, 30 days, festivals) or send emails.",
         });
       }
     } catch (error: any) {
@@ -680,16 +794,263 @@ Provide a detailed campaign plan with:
               </div>
             </div>
 
-            {/* Customer Calling Section - Test Campaign Effectiveness */}
+            {/* Step 1: Chat Interface for Campaign Generation */}
+            <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <MessageSquare className="h-5 w-5 text-accent" />
+                      Step 1: Chat to Generate Campaigns
+                    </CardTitle>
+                    <p className="text-sm text-muted-foreground mt-2">
+                      Start by chatting with AI to generate personalized marketing campaigns. Ask for "7 day campaign", "30 day campaign", or "festival campaign" to create structured schedules.
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="bg-accent/10 text-accent border-accent/30">
+                    Step 1 of 3
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-col h-[600px] border border-border rounded-lg bg-background">
+                  {/* Chat Messages */}
+                  <ScrollArea className="flex-1 p-4">
+                    <div className="space-y-4">
+                      {chatMessages.map((message, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex gap-3 ${
+                            message.role === "user" ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          {message.role === "assistant" && (
+                            <Avatar className="h-8 w-8">
+                              <AvatarFallback className="bg-accent/20 text-accent">
+                                <Bot className="h-4 w-4" />
+                              </AvatarFallback>
+                            </Avatar>
+                          )}
+                          <div
+                            className={`max-w-[80%] rounded-lg p-3 ${
+                              message.role === "user"
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted text-foreground"
+                            }`}
+                          >
+                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                            <p className="text-xs opacity-70 mt-1">
+                              {message.timestamp.toLocaleTimeString()}
+                            </p>
+                          </div>
+                          {message.role === "user" && (
+                            <Avatar className="h-8 w-8">
+                              <AvatarFallback className="bg-primary/20 text-primary">
+                                <User className="h-4 w-4" />
+                              </AvatarFallback>
+                            </Avatar>
+                          )}
+                        </div>
+                      ))}
+                      {chatLoading && (
+                        <div className="flex gap-3 justify-start">
+                          <Avatar className="h-8 w-8">
+                            <AvatarFallback className="bg-accent/20 text-accent">
+                              <Bot className="h-4 w-4" />
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="bg-muted rounded-lg p-3">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </ScrollArea>
+
+                  {/* Chat Input */}
+                  <div className="border-t border-border p-4">
+                    <div className="flex gap-2">
+                      <Textarea
+                        placeholder="Ask me to generate a campaign... (e.g., 'Create a 7-day campaign for coffee lovers' or 'Generate a festival campaign for the holidays')"
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            handleChatMessage();
+                          }
+                        }}
+                        className="min-h-[60px] resize-none"
+                        disabled={chatLoading}
+                      />
+                      <Button
+                        onClick={handleChatMessage}
+                        disabled={chatLoading || !chatInput.trim()}
+                        className="bg-accent hover:bg-accent/90"
+                        size="icon"
+                      >
+                        {chatLoading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Send className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Press Enter to send, Shift+Enter for new line
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Generated Campaigns Display */}
+            {generatedCampaigns.length > 0 && (
+              <Card className="border-success/30 bg-gradient-to-br from-success/5 to-transparent">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-success" />
+                    Generated Campaigns ({generatedCampaigns.length})
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground mt-2">
+                    Campaigns generated from chat. You can now send emails or make calls to test effectiveness.
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {generatedCampaigns.map((campaign, idx) => (
+                      <CampaignCard key={idx} campaign={campaign} />
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Step 2: Bulk Email Sending - Only show after campaigns are generated */}
+            {generatedCampaigns.length > 0 && (
             <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
               <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Mail className="h-5 w-5 text-primary" />
+                      Step 2: Send Bulk Emails
+                    </CardTitle>
+                    <p className="text-sm text-muted-foreground mt-2">
+                      Send campaign emails to customers in bulk. Load customers from your database or add manually.
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
+                    Step 2 of 3
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex gap-2">
+                  <Button
+                    onClick={loadCustomersForEmail}
+                    variant="outline"
+                    className="flex-1"
+                  >
+                    <User className="h-4 w-4 mr-2" />
+                    Load Customers ({emailRecipients.length})
+                  </Button>
+                </div>
+
+                {emailRecipients.length > 0 && (
+                  <div className="p-3 bg-muted rounded-lg border border-border">
+                    <p className="text-sm font-semibold mb-2">Recipients: {emailRecipients.length} customers</p>
+                    <ScrollArea className="h-32">
+                      <div className="space-y-1">
+                        {emailRecipients.slice(0, 10).map((recipient, idx) => (
+                          <div key={idx} className="text-xs text-muted-foreground">
+                            {recipient.name || recipient.email}
+                          </div>
+                        ))}
+                        {emailRecipients.length > 10 && (
+                          <p className="text-xs text-muted-foreground">... and {emailRecipients.length - 10} more</p>
+                        )}
+                      </div>
+                    </ScrollArea>
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-medium">Email Subject</label>
+                    <Input
+                      placeholder="e.g., Special Offer - Limited Time!"
+                      value={emailSubject}
+                      onChange={(e) => setEmailSubject(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium">Email Body</label>
+                    <Textarea
+                      placeholder="Enter your email content here. Use {{first_name}} for personalization."
+                      value={emailBody}
+                      onChange={(e) => setEmailBody(e.target.value)}
+                      className="min-h-[120px]"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Use placeholders: {"{{first_name}}"}, {"{{last_name}}"}, {"{{favorite_product}}"} for personalization
+                    </p>
+                  </div>
+                </div>
+
+                <Button
+                  onClick={sendBulkEmails}
+                  disabled={emailLoading || emailRecipients.length === 0 || !emailSubject.trim() || !emailBody.trim()}
+                  className="w-full bg-primary hover:bg-primary/90"
+                >
+                  {emailLoading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Sending...
+                    </>
+                  ) : emailSent ? (
+                    <>
+                      <MailCheck className="h-4 w-4 mr-2" />
+                      Emails Sent!
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="h-4 w-4 mr-2" />
+                      Send Bulk Emails ({emailRecipients.length})
+                    </>
+                  )}
+                </Button>
+
+                {emailResults && (
+                  <div className="p-3 bg-success/10 rounded-lg border border-success/30">
+                    <p className="text-sm font-semibold text-success mb-1">Email Results</p>
+                    <p className="text-xs text-muted-foreground">
+                      Sent: {emailResults.sent} | Failed: {emailResults.failed}
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+            )}
+
+            {/* Step 3: Customer Calling Section - Only show after emails are sent */}
+            {emailSent && (
+            <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
                 <CardTitle className="flex items-center gap-2">
                   <PhoneCall className="h-5 w-5 text-primary" />
-                  Call Customers to Test Campaign Effectiveness
+                      Step 3: Call Customers to Test Campaign Effectiveness
                 </CardTitle>
                 <p className="text-sm text-muted-foreground mt-2">
-                  Load top 5 engaged customers to call one by one, or manually add a phone number to call.
+                      Call customers to test how effective your campaigns are. Load top 5 engaged customers or manually add a phone number.
                 </p>
+                  </div>
+                  <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
+                    Step 3 of 3
+                  </Badge>
+                </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 {/* Mode Toggle */}
@@ -998,332 +1359,68 @@ Provide a detailed campaign plan with:
                       </div>
                     )}
 
-                    {/* Conversation Log */}
-                    {conversationLog.length > 0 && (
+                    {/* Conversation Log - Show full conversation from call */}
+                    {callConversation && callConversation.conversation_history.length > 0 && (
                       <div className="pt-4 border-t border-border">
-                        <p className="text-sm font-semibold mb-2">Conversation Log:</p>
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-sm font-semibold">Call Conversation ({callConversation.total_exchanges} exchanges):</p>
+                          <Badge variant="outline" className="bg-success/10 text-success border-success/30">
+                            Campaign Feedback Captured
+                          </Badge>
+                            </div>
+                        <div className="space-y-2 max-h-60 overflow-y-auto bg-muted/30 p-3 rounded-lg">
+                          {callConversation.conversation_history.map((log, idx) => (
+                        <div
+                          key={idx}
+                              className={`text-xs p-2 rounded ${
+                                log.role === "agent" 
+                                  ? "bg-primary/10 text-primary-foreground ml-4" 
+                                  : log.role === "customer"
+                                  ? "bg-accent/10 text-accent-foreground mr-4"
+                                  : "bg-muted"
+                              }`}
+                            >
+                              <span className="font-semibold capitalize">{log.role}:</span> {log.content}
+                          </div>
+                          ))}
+                        </div>
+                        
+                        {/* Campaign Effectiveness Summary */}
+                        {callConversation.customer_responses.length > 0 && (
+                          <div className="mt-3 p-3 bg-success/5 rounded-lg border border-success/20">
+                            <p className="text-xs font-semibold text-success mb-1">Customer Feedback Summary:</p>
+                            <ul className="text-xs text-muted-foreground space-y-1">
+                              {callConversation.customer_responses.map((response, idx) => (
+                                <li key={idx} className="flex items-start gap-2">
+                                  <span className="text-success">•</span>
+                                  <span>{response}</span>
+                                </li>
+                              ))}
+                            </ul>
+                        </div>
+                      )}
+                    </div>
+                    )}
+                    
+                    {/* Fallback conversation log if no call conversation yet */}
+                    {!callConversation && conversationLog.length > 0 && (
+                      <div className="pt-4 border-t border-border">
+                        <p className="text-sm font-semibold mb-2">Call Activity:</p>
                         <div className="space-y-2 max-h-40 overflow-y-auto">
                           {conversationLog.map((log, idx) => (
                             <div key={idx} className="text-xs p-2 bg-muted rounded">
                               <span className="font-semibold">{log.role}:</span> {log.content}
-                            </div>
+                    </div>
                           ))}
-                        </div>
-                      </div>
+                  </div>
+                </div>
                     )}
                   </div>
                 )}
-              </CardContent>
-            </Card>
-
-            {/* Voice Conversation Section */}
-            <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Volume2 className="h-5 w-5 text-accent" />
-                  Voice Conversation with Campaign Agent (ElevenLabs)
-                </CardTitle>
-                <p className="text-sm text-muted-foreground mt-2">
-                  Ask questions about campaigns, customer engagement, and effectiveness. Get natural voice responses.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="e.g., Who are our most active customers? How are campaigns performing?"
-                    value={voiceQuery}
-                    onChange={(e) => setVoiceQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleVoiceQuery()}
-                    className="flex-1"
-                  />
-                  <Button
-                    onClick={handleVoiceQuery}
-                    disabled={voiceLoading || !voiceQuery.trim()}
-                    className="bg-accent hover:bg-accent/90"
-                  >
-                    {voiceLoading ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Processing...
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="h-4 w-4 mr-2" />
-                        Ask
-                      </>
-                    )}
-                  </Button>
-                </div>
-
-                {voiceResponse && (
-                  <div className="space-y-3 pt-4 border-t border-border">
-                    <div className="flex items-start gap-2">
-                      <MessageSquare className="h-4 w-4 text-muted-foreground mt-1 flex-shrink-0" />
-                      <div className="flex-1">
-                        <p className="text-sm font-semibold text-foreground mb-1">Response:</p>
-                        <p className="text-sm text-muted-foreground whitespace-pre-wrap">{voiceResponse}</p>
-                      </div>
-                    </div>
-
-                    {audioBlob && (
-                      <div className="flex gap-2 pt-2">
-                        <Button
-                          onClick={playVoiceResponse}
-                          variant="outline"
-                          size="sm"
-                        >
-                          <Play className="h-4 w-4 mr-2" />
-                          Play Audio
-                        </Button>
-                        <Button
-                          onClick={downloadVoiceResponse}
-                          variant="outline"
-                          size="sm"
-                        >
-                          <Download className="h-4 w-4 mr-2" />
-                          Download
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className="text-xs text-muted-foreground pt-2 border-t border-border">
-                  <p className="font-semibold mb-1">Example queries:</p>
-                  <ul className="list-disc list-inside space-y-1">
-                    <li>"Who are our most active customers?"</li>
-                    <li>"How are email campaigns performing?"</li>
-                    <li>"Which customers have the highest campaign conversion rates?"</li>
-                    <li>"Show me customers with high lifetime value who engaged with campaigns"</li>
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Chat Interface for Campaign Generation */}
-            <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <MessageSquare className="h-5 w-5 text-accent" />
-                  Chat to Generate Campaigns
-                </CardTitle>
-                <p className="text-sm text-muted-foreground mt-2">
-                  Have a conversation with AI to generate personalized marketing campaigns based on your customer data.
-                </p>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-col h-[600px] border border-border rounded-lg bg-background">
-                  {/* Chat Messages */}
-                  <ScrollArea className="flex-1 p-4">
-                    <div className="space-y-4">
-                      {chatMessages.map((message, idx) => (
-                        <div
-                          key={idx}
-                          className={`flex gap-3 ${
-                            message.role === "user" ? "justify-end" : "justify-start"
-                          }`}
-                        >
-                          {message.role === "assistant" && (
-                            <Avatar className="h-8 w-8">
-                              <AvatarFallback className="bg-accent/20 text-accent">
-                                <Bot className="h-4 w-4" />
-                              </AvatarFallback>
-                            </Avatar>
-                          )}
-                          <div
-                            className={`max-w-[80%] rounded-lg p-3 ${
-                              message.role === "user"
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted text-foreground"
-                            }`}
-                          >
-                            <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                            <p className="text-xs opacity-70 mt-1">
-                              {message.timestamp.toLocaleTimeString()}
-                            </p>
-                          </div>
-                          {message.role === "user" && (
-                            <Avatar className="h-8 w-8">
-                              <AvatarFallback className="bg-primary/20 text-primary">
-                                <User className="h-4 w-4" />
-                              </AvatarFallback>
-                            </Avatar>
-                          )}
-                        </div>
-                      ))}
-                      {chatLoading && (
-                        <div className="flex gap-3 justify-start">
-                          <Avatar className="h-8 w-8">
-                            <AvatarFallback className="bg-accent/20 text-accent">
-                              <Bot className="h-4 w-4" />
-                            </AvatarFallback>
-                          </Avatar>
-                          <div className="bg-muted rounded-lg p-3">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </ScrollArea>
-
-                  {/* Chat Input */}
-                  <div className="border-t border-border p-4">
-                    <div className="flex gap-2">
-                      <Textarea
-                        placeholder="Ask me to generate a campaign... (e.g., 'Create a 7-day campaign for coffee lovers' or 'Generate a festival campaign for the holidays')"
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            handleChatMessage();
-                          }
-                        }}
-                        className="min-h-[60px] resize-none"
-                        disabled={chatLoading}
-                      />
-                      <Button
-                        onClick={handleChatMessage}
-                        disabled={chatLoading || !chatInput.trim()}
-                        className="bg-accent hover:bg-accent/90"
-                        size="icon"
-                      >
-                        {chatLoading ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Send className="h-4 w-4" />
-                        )}
-                      </Button>
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Press Enter to send, Shift+Enter for new line
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Tabs defaultValue="7days" className="w-full">
-              <TabsList className="grid w-full grid-cols-3 max-w-md">
-                <TabsTrigger value="7days">Next 7 Days</TabsTrigger>
-                <TabsTrigger value="30days">Next 30 Days</TabsTrigger>
-                <TabsTrigger value="festival">Festivals</TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="7days" className="space-y-6 mt-6">
-                <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
-                  <CardHeader>
-                    <CardTitle>7-Day Campaign Schedule</CardTitle>
-                    <p className="text-sm text-muted-foreground">
-                      Generate a complete week of campaign content with AI predictions
-                    </p>
-                  </CardHeader>
-                  <CardContent>
-                    <Button
-                      onClick={() => generateCampaigns("7days")}
-                      disabled={loading}
-                      className="w-full bg-accent hover:bg-accent/90"
-                    >
-                      {loading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Generating...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="h-4 w-4 mr-2" />
-                          Generate 7-Day Plan
-                        </>
-                      )}
-                    </Button>
                   </CardContent>
                 </Card>
+            )}
 
-                {campaigns7Days.length > 0 && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {campaigns7Days.map((campaign, idx) => (
-                      <CampaignCard key={idx} campaign={campaign} />
-                    ))}
-                  </div>
-                )}
-              </TabsContent>
-
-              <TabsContent value="30days" className="space-y-6 mt-6">
-                <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
-                  <CardHeader>
-                    <CardTitle>30-Day Campaign Schedule</CardTitle>
-                    <p className="text-sm text-muted-foreground">
-                      Generate a month-long campaign strategy with daily content
-                    </p>
-                  </CardHeader>
-                  <CardContent>
-                    <Button
-                      onClick={() => generateCampaigns("30days")}
-                      disabled={loading}
-                      className="w-full bg-accent hover:bg-accent/90"
-                    >
-                      {loading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Generating...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="h-4 w-4 mr-2" />
-                          Generate 30-Day Plan
-                        </>
-                      )}
-                    </Button>
-                  </CardContent>
-                </Card>
-
-                {campaigns30Days.length > 0 && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {campaigns30Days.map((campaign, idx) => (
-                      <CampaignCard key={idx} campaign={campaign} />
-                    ))}
-                  </div>
-                )}
-              </TabsContent>
-
-              <TabsContent value="festival" className="space-y-6 mt-6">
-                <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
-                  <CardHeader>
-                    <CardTitle>Festival Campaign Schedule</CardTitle>
-                    <p className="text-sm text-muted-foreground">
-                      Generate campaigns for upcoming festivals and special occasions
-                    </p>
-                  </CardHeader>
-                  <CardContent>
-                    <Button
-                      onClick={() => generateCampaigns("festival")}
-                      disabled={loading}
-                      className="w-full bg-accent hover:bg-accent/90"
-                    >
-                      {loading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Generating...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="h-4 w-4 mr-2" />
-                          Generate Festival Campaigns
-                        </>
-                      )}
-                    </Button>
-                  </CardContent>
-                </Card>
-
-                {festivalCampaigns.length > 0 && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {festivalCampaigns.map((campaign, idx) => (
-                      <CampaignCard key={idx} campaign={campaign} />
-                    ))}
-                  </div>
-                )}
-              </TabsContent>
-            </Tabs>
           </div>
         </main>
       </div>

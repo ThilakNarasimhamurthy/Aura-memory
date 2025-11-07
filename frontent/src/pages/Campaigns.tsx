@@ -35,7 +35,32 @@ export default function Campaigns() {
     try {
       // Get campaign effectiveness from backend
       const response = await campaignsApi.getEffectiveness();
-      setEffectivenessData(response.answer);
+      
+      // Ensure response is valid
+      if (!response) {
+        setEffectivenessData("Unable to load campaign data. Please try again.");
+        setChannelData([]);
+        setSegmentData([]);
+        setCampaigns([]);
+        return;
+      }
+      
+      setEffectivenessData(response.answer || "Campaign analysis generated.");
+
+      // Ensure documents array exists
+      const documents = Array.isArray(response.documents) ? response.documents : [];
+      
+      if (documents.length === 0) {
+        setChannelData([]);
+        setSegmentData([]);
+        setCampaigns([]);
+        toast({
+          title: "No Campaign Data",
+          description: "No customer campaign data found. Please upload customer data first.",
+          variant: "default",
+        });
+        return;
+      }
 
       // Parse campaign data from response
       // Extract metrics from the answer and documents
@@ -45,18 +70,30 @@ export default function Campaigns() {
         social: { revenue: 0, roi: 0, count: 0 },
       };
 
-      response.documents.forEach((doc) => {
+      documents.forEach((doc) => {
         const metadata = doc.metadata;
-        const channel = metadata.preferred_contact_method?.toLowerCase() || "email";
-        const revenue = metadata.total_spent || 0;
-        const roi = metadata.converted_campaigns && metadata.responded_to_campaigns
-          ? (metadata.converted_campaigns / metadata.responded_to_campaigns) * 100
-          : 0;
+        const channel = (metadata.preferred_contact_method?.toLowerCase() || "email").split(' ')[0]; // Get first word
+        const revenue = typeof metadata.total_spent === 'number' 
+          ? metadata.total_spent 
+          : parseFloat(String(metadata.total_spent || 0));
+        const converted = typeof metadata.converted_campaigns === 'number'
+          ? metadata.converted_campaigns
+          : parseInt(String(metadata.converted_campaigns || 0), 10);
+        const responded = typeof metadata.responded_to_campaigns === 'number'
+          ? metadata.responded_to_campaigns
+          : parseInt(String(metadata.responded_to_campaigns || 0), 10);
+        const roi = responded > 0 ? (converted / responded) * 100 : 0;
 
-        if (metrics[channel]) {
-          metrics[channel].revenue += revenue;
-          metrics[channel].roi += roi;
-          metrics[channel].count += 1;
+        // Map channel names to our metrics keys
+        const channelKey = channel.includes('email') ? 'email' 
+          : channel.includes('sms') || channel.includes('text') ? 'sms'
+          : channel.includes('social') || channel.includes('facebook') || channel.includes('twitter') ? 'social'
+          : 'email'; // default
+
+        if (metrics[channelKey]) {
+          metrics[channelKey].revenue += revenue;
+          metrics[channelKey].roi += roi;
+          metrics[channelKey].count += 1;
         }
       });
 
@@ -69,9 +106,11 @@ export default function Campaigns() {
 
       // Aggregate by segment
       const segmentMap = new Map();
-      response.documents.forEach((doc) => {
+      documents.forEach((doc) => {
         const segment = doc.metadata.customer_segment || "Unknown";
-        const revenue = doc.metadata.total_spent || 0;
+        const revenue = typeof doc.metadata.total_spent === 'number'
+          ? doc.metadata.total_spent
+          : parseFloat(String(doc.metadata.total_spent || 0));
         const current = segmentMap.get(segment) || { segment, revenue: 0 };
         segmentMap.set(segment, {
           segment,
@@ -85,18 +124,33 @@ export default function Campaigns() {
       setSegmentData(segmentArr);
 
       // Create campaign list from documents
-      const campaignList: Campaign[] = response.documents.slice(0, 20).map((doc, idx) => {
+      const campaignList: Campaign[] = documents.slice(0, 20).map((doc, idx) => {
         const meta = doc.metadata;
+        const converted = typeof meta.converted_campaigns === 'number'
+          ? meta.converted_campaigns
+          : parseInt(String(meta.converted_campaigns || 0), 10);
+        const responded = typeof meta.responded_to_campaigns === 'number'
+          ? meta.responded_to_campaigns
+          : parseInt(String(meta.responded_to_campaigns || 0), 10);
+        const conversion_rate = responded > 0 ? converted / responded : 0;
+        const click_rate = typeof meta.email_click_rate === 'number'
+          ? meta.email_click_rate
+          : parseFloat(String(meta.email_click_rate || 0));
+        const total_spend = typeof meta.total_spent === 'number'
+          ? meta.total_spent
+          : parseFloat(String(meta.total_spent || 0));
+        const lifetime_value = typeof meta.lifetime_value === 'number'
+          ? meta.lifetime_value
+          : parseFloat(String(meta.lifetime_value || 0));
+        
         return {
-          campaign_name: `Campaign ${idx + 1}`,
-          channel: meta.preferred_contact_method || "Email",
+          campaign_name: meta.campaign_name || `Campaign ${idx + 1}`,
+          channel: meta.preferred_contact_method || meta.channel || "Email",
           customer_segment: meta.customer_segment || "All",
-          conversion_rate: meta.converted_campaigns && meta.responded_to_campaigns
-            ? meta.converted_campaigns / meta.responded_to_campaigns
-            : 0,
-          roi: meta.email_click_rate || 0,
-          total_spend: meta.total_spent || 0,
-          total_revenue: meta.lifetime_value || 0,
+          conversion_rate,
+          roi: click_rate * 100, // Convert to percentage
+          total_spend,
+          total_revenue: lifetime_value || total_spend,
         };
       });
       setCampaigns(campaignList);

@@ -24,26 +24,73 @@ class MemMachineMCPClient:
         self.user_id = user_id
         self.session_id: Optional[str] = None
         self.client = httpx.AsyncClient(timeout=30.0)
+        self._initialization_attempted = False
+        self._initialization_failed = False
+        self._failure_reason: Optional[str] = None
 
     async def _get_session_id(self) -> str:
         """Get or retrieve a session ID from the MCP server."""
         if self.session_id:
             return self.session_id
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                self.mcp_url,
-                headers={"Accept": "text/event-stream"},
-                timeout=5.0,
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    self.mcp_url,
+                    headers={"Accept": "text/event-stream"},
+                    timeout=5.0,
+                )
+                
+                # Check if the endpoint exists
+                if response.status_code == 404:
+                    raise ValueError(
+                        f"MemMachine MCP server endpoint not found at {self.mcp_url}. "
+                        f"Please ensure the MemMachine MCP server is running. "
+                        f"See MemMachine/QUICK_START.md for setup instructions."
+                    )
+                
+                if response.status_code != 200:
+                    raise ValueError(
+                        f"MemMachine MCP server returned status {response.status_code}. "
+                        f"Please check if the server is running at {self.base_url}"
+                    )
+                
+                self.session_id = response.headers.get("mcp-session-id")
+                if not self.session_id:
+                    raise ValueError(
+                        f"MemMachine MCP server at {self.mcp_url} did not return a session ID. "
+                        f"The server may not be properly configured or may be using a different protocol version."
+                    )
+                return self.session_id
+        except httpx.ConnectError as e:
+            raise ValueError(
+                f"Failed to connect to MemMachine MCP server at {self.base_url}. "
+                f"Please ensure the server is running. Error: {str(e)}"
             )
-            self.session_id = response.headers.get("mcp-session-id")
-            if not self.session_id:
-                raise ValueError("Failed to get session ID from MCP server")
-            return self.session_id
+        except httpx.TimeoutException:
+            raise ValueError(
+                f"Timeout connecting to MemMachine MCP server at {self.base_url}. "
+                f"The server may be slow to respond or not running."
+            )
 
     async def _initialize_session(self) -> None:
         """Initialize the MCP session."""
-        session_id = await self._get_session_id()
+        # Skip if we've already failed to initialize
+        if self._initialization_failed:
+            raise ValueError(
+                f"MemMachine MCP server initialization previously failed: {self._failure_reason}. "
+                f"Please check the server status at {self.base_url}"
+            )
+        
+        # Mark that we're attempting initialization
+        self._initialization_attempted = True
+        
+        try:
+            session_id = await self._get_session_id()
+        except Exception as e:
+            self._initialization_failed = True
+            self._failure_reason = str(e)
+            raise
 
         payload = {
             "jsonrpc": "2.0",
@@ -162,9 +209,18 @@ class MemMachineMCPClient:
         Returns:
             Result dictionary with status and message
         """
-        # Ensure session is initialized
-        if not self.session_id:
-            await self._initialize_session()
+        # Ensure session is initialized (skip if we know it will fail)
+        if not self.session_id and not self._initialization_failed:
+            try:
+                await self._initialize_session()
+            except Exception as e:
+                # If initialization fails, raise immediately for add_memory
+                raise ValueError(f"MemMachine unavailable: {e}") from e
+        
+        if self._initialization_failed:
+            raise ValueError(
+                f"MemMachine MCP server is not available: {self._failure_reason}"
+            )
         
         user_id = user_id or self.user_id
 
@@ -202,9 +258,18 @@ class MemMachineMCPClient:
         Returns:
             Search results dictionary
         """
-        # Ensure session is initialized
-        if not self.session_id:
-            await self._initialize_session()
+        # Ensure session is initialized (skip if we know it will fail)
+        if not self.session_id and not self._initialization_failed:
+            try:
+                await self._initialize_session()
+            except Exception as e:
+                # If initialization fails, raise immediately for search_memory
+                raise ValueError(f"MemMachine unavailable: {e}") from e
+        
+        if self._initialization_failed:
+            raise ValueError(
+                f"MemMachine MCP server is not available: {self._failure_reason}"
+            )
         
         user_id = user_id or self.user_id
 
@@ -248,12 +313,8 @@ async def get_memmachine_client() -> MemMachineMCPClient:
         mcp_url = settings.memmachine_mcp_url
         user_id = settings.memmachine_user_id
         _memmachine_client = MemMachineMCPClient(base_url=mcp_url, user_id=user_id)
-        # Initialize session on first use (lazy initialization)
-        try:
-            await _memmachine_client._initialize_session()
-        except Exception:
-            # If initialization fails, we'll retry on first tool call
-            pass
+        # Don't initialize session eagerly - let it initialize on first use
+        # This allows the app to start even if MemMachine is not available
     return _memmachine_client
 
 

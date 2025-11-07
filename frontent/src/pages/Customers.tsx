@@ -38,6 +38,18 @@ export default function Customers() {
       // Get active customers from backend
       const response = await customersApi.findActive(20);
       
+      // Ensure documents array exists and is valid
+      if (!response || !response.documents || response.documents.length === 0) {
+        setCustomers([]);
+        setFilteredCustomers([]);
+        toast({
+          title: "No Customers Found",
+          description: response?.answer || "No customer data available. Please upload customer data first.",
+          variant: "default",
+        });
+        return;
+      }
+      
       // Extract customer data from documents
       const customerMap = new Map<string, Customer>();
       
@@ -45,21 +57,56 @@ export default function Customers() {
         const metadata = doc.metadata as CustomerDocument;
         if (metadata.customer_id) {
           const customerId = String(metadata.customer_id);
+          // Only add if we don't have this customer yet, or if this document has more complete data
           if (!customerMap.has(customerId)) {
             customerMap.set(customerId, {
               customer_id: customerId,
               customer_segment: metadata.customer_segment,
-              loyalty_member: metadata.loyalty_member ? "Yes" : "No",
-              churn_risk_score: metadata.churn_risk_score,
-              lifetime_value: metadata.lifetime_value,
+              loyalty_member: metadata.loyalty_member 
+                ? (typeof metadata.loyalty_member === 'string' 
+                   ? metadata.loyalty_member 
+                   : metadata.loyalty_member ? "Yes" : "No")
+                : "No",
+              churn_risk_score: typeof metadata.churn_risk_score === 'number' 
+                ? metadata.churn_risk_score 
+                : parseFloat(String(metadata.churn_risk_score || 0)),
+              lifetime_value: typeof metadata.lifetime_value === 'number'
+                ? metadata.lifetime_value
+                : parseFloat(String(metadata.lifetime_value || 0)),
               favorite_product_category: metadata.favorite_product_category,
               preferred_contact_method: metadata.preferred_contact_method,
-              total_purchases: metadata.total_purchases,
-              total_spent: metadata.total_spent,
+              total_purchases: typeof metadata.total_purchases === 'number'
+                ? metadata.total_purchases
+                : parseInt(String(metadata.total_purchases || 0), 10),
+              total_spent: typeof metadata.total_spent === 'number'
+                ? metadata.total_spent
+                : parseFloat(String(metadata.total_spent || 0)),
               email: metadata.email,
               first_name: metadata.first_name,
               last_name: metadata.last_name,
             });
+          } else {
+            // Update existing customer with any missing fields
+            const existing = customerMap.get(customerId)!;
+            if (!existing.first_name && metadata.first_name) existing.first_name = metadata.first_name;
+            if (!existing.last_name && metadata.last_name) existing.last_name = metadata.last_name;
+            if (!existing.email && metadata.email) existing.email = metadata.email;
+            if (!existing.customer_segment && metadata.customer_segment) existing.customer_segment = metadata.customer_segment;
+            if (!existing.total_purchases && metadata.total_purchases) {
+              existing.total_purchases = typeof metadata.total_purchases === 'number'
+                ? metadata.total_purchases
+                : parseInt(String(metadata.total_purchases || 0), 10);
+            }
+            if (!existing.total_spent && metadata.total_spent) {
+              existing.total_spent = typeof metadata.total_spent === 'number'
+                ? metadata.total_spent
+                : parseFloat(String(metadata.total_spent || 0));
+            }
+            if (!existing.lifetime_value && metadata.lifetime_value) {
+              existing.lifetime_value = typeof metadata.lifetime_value === 'number'
+                ? metadata.lifetime_value
+                : parseFloat(String(metadata.lifetime_value || 0));
+            }
           }
         }
       });
@@ -91,9 +138,12 @@ export default function Customers() {
   useEffect(() => {
     if (searchTerm) {
       const filtered = customers.filter(c => 
-        c.customer_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        c.customer_segment.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        c.favorite_product_category.toLowerCase().includes(searchTerm.toLowerCase())
+        (c.customer_id?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (c.customer_segment?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (c.favorite_product_category?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (c.email?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (c.first_name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (c.last_name?.toLowerCase() || "").includes(searchTerm.toLowerCase())
       );
       setFilteredCustomers(filtered);
     } else {
