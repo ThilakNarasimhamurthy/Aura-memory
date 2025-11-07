@@ -58,12 +58,12 @@ cd MemMachine
 ./start_memmachine.sh
 ```
 
-See `MEMSERVER_START.md` for detailed MemMachine setup instructions.
+See `MemMachine/QUICK_START.md` for detailed MemMachine setup instructions.
 
 ### 3. Frontend Setup
 
 ```bash
-cd frontent
+cd frontend
 
 # Install dependencies
 npm install
@@ -180,7 +180,7 @@ ELL/
 │   │   └── workflows/      # LangGraph workflows
 │   ├── scripts/            # Utility scripts
 │   └── docs/               # Backend documentation
-├── frontent/               # React frontend application
+├── frontend/               # React frontend application
 │   ├── src/
 │   │   ├── pages/          # Page components
 │   │   ├── components/     # React components
@@ -206,20 +206,19 @@ ELL/
 ### Frontend Configuration
 - Frontend runs on port 8080 by default
 - API base URL: `http://localhost:8000`
-- See `frontent/src/lib/api.ts` for API configuration
+- See `frontend/src/lib/api.ts` for API configuration
 
 ## 📚 Documentation
 
 - **Backend API Docs**: `http://localhost:8000/docs` (Swagger UI)
-- **MemMachine Setup**: See `MEMSERVER_START.md`
-- **Backend Structure**: See `backend/STRUCTURE.md`
-- **Troubleshooting**: See `backend/TROUBLESHOOTING.md`
+- **MemMachine Setup**: See `MemMachine/QUICK_START.md`
+- **Backend Structure**: See `backend/tests/STRUCTURE.md`
 
 ## 🧪 Testing
 
 ### Backend API Testing
 ```bash
-cd backend
+cd backend/tests
 ./test_apis.sh
 ```
 
