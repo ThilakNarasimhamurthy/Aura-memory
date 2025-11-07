@@ -1,4 +1,4 @@
-# ELL - Enterprise Language Learning Platform
+# Aura Memory
 
 A comprehensive enterprise platform that combines AI-powered language processing, memory management, and customer engagement tools. The platform features RAG (Retrieval Augmented Generation), predictive analytics, campaign automation, and voice-enabled phone call integration.
 
