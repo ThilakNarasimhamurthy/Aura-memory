@@ -1,0 +1,26 @@
+campaign_id,campaign_name,channel,budget_usd,impressions,clicks,conversions,revenue_usd,roi_percent,conversion_rate,cost_per_click,customer_segment,season,day_of_week,time_of_day,engagement_rate,email_open_rate,video_completion_rate,customer_satisfaction,repeat_purchase_rate
+1,Campaign_1,Email,700,13000,520,62,1860,165.71,11.92,1.35,Loyal,Fall,Tuesday,Afternoon,4,51.0,,4.1,17.5
+2,Campaign_2,Facebook,900,16000,640,76,2660,195.56,11.88,1.41,Students,Winter,Wednesday,Evening,5,,,4.2,20.0
+3,Campaign_3,Google Ads,1100,19000,760,91,3640,230.91,11.97,1.45,Families,Spring,Thursday,Morning,6,,63.0,4.3,22.5
+4,Campaign_4,SMS,1300,22000,880,105,4725,263.46,11.93,1.48,New,Summer,Friday,Afternoon,7,,,4.4,25.0
+5,Campaign_5,LinkedIn,1500,25000,1000,120,3000,100.0,12.0,1.5,Loyal,Fall,Saturday,Evening,8,,,4.5,27.5
+6,Campaign_6,TikTok,1700,28000,1120,134,4020,136.47,11.96,1.52,Students,Winter,Sunday,Morning,9,,66.0,4.6,30.0
+7,Campaign_7,Multi,1900,31000,1240,148,5180,172.63,11.94,1.53,Families,Spring,Monday,Afternoon,10,,,4.7,32.5
+8,Campaign_8,Instagram,2100,34000,1360,163,6520,210.48,11.99,1.54,New,Summer,Tuesday,Evening,11,,,4.8,35.0
+9,Campaign_9,Email,2300,37000,1480,177,7965,246.3,11.96,1.55,Loyal,Fall,Wednesday,Morning,12,59.0,69.0,4.9,37.5
+10,Campaign_10,Facebook,2500,40000,1600,192,4800,92.0,12.0,1.56,Students,Winter,Thursday,Afternoon,3,,,4.0,40.0
+11,Campaign_11,Google Ads,2700,43000,1720,206,6180,128.89,11.98,1.57,Families,Spring,Friday,Evening,4,,,4.1,42.5
+12,Campaign_12,SMS,2900,46000,1840,220,7700,165.52,11.96,1.58,New,Summer,Saturday,Morning,5,,72.0,4.2,45.0
+13,Campaign_13,LinkedIn,3100,49000,1960,235,9400,203.23,11.99,1.58,Loyal,Fall,Sunday,Afternoon,6,,,4.3,47.5
+14,Campaign_14,TikTok,3300,52000,2080,249,11205,239.55,11.97,1.59,Students,Winter,Monday,Evening,7,,,4.4,50.0
+15,Campaign_15,Multi,3500,55000,2200,264,6600,88.57,12.0,1.59,Families,Spring,Tuesday,Morning,8,,75.0,4.5,52.5
+16,Campaign_16,Instagram,3700,58000,2320,278,8340,125.41,11.98,1.59,New,Summer,Wednesday,Afternoon,9,,,4.6,55.0
+17,Campaign_17,Email,3900,61000,2440,292,10220,162.05,11.97,1.6,Loyal,Fall,Thursday,Evening,10,67.0,,4.7,57.5
+18,Campaign_18,Facebook,4100,64000,2560,307,12280,199.51,11.99,1.6,Students,Winter,Friday,Morning,11,,78.0,4.8,60.0
+19,Campaign_19,Google Ads,4300,67000,2680,321,14445,235.93,11.98,1.6,Families,Spring,Saturday,Afternoon,12,,,4.9,62.5
+20,Campaign_20,SMS,4500,70000,2800,336,8400,86.67,12.0,1.61,New,Summer,Sunday,Evening,3,,,4.0,65.0
+21,Campaign_21,LinkedIn,4700,73000,2920,350,10500,123.4,11.99,1.61,Loyal,Fall,Monday,Morning,4,,81.0,4.1,67.5
+22,Campaign_22,TikTok,4900,76000,3040,364,12740,160.0,11.97,1.61,Students,Winter,Tuesday,Afternoon,5,,,4.2,70.0
+23,Campaign_23,Multi,5100,79000,3160,379,15160,197.25,11.99,1.61,Families,Spring,Wednesday,Evening,6,,,4.3,72.5
+24,Campaign_24,Instagram,5300,82000,3280,393,17685,233.68,11.98,1.62,New,Summer,Thursday,Morning,7,,84.0,4.4,75.0
+25,Campaign_25,Email,5500,85000,3400,408,10200,85.45,12.0,1.62,Loyal,Fall,Friday,Afternoon,8,75.0,,4.5,77.5

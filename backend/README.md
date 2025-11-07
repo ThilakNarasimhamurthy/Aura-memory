@@ -33,19 +33,23 @@ Python FastAPI service configured to connect to MongoDB.
    **Easiest way (recommended - handles everything automatically):**
    ```bash
    cd backend
-   python3 setup_and_run.py
+   python3 scripts/setup_and_run.py
    ```
 
    **Using shell script:**
    ```bash
    cd backend
-   bash start_server.sh
+   ./scripts/start_server.sh
    ```
 
    **Manual way:**
    From the `backend` directory:
    ```bash
-   uvicorn main:app --reload
+   uvicorn app.main:app --reload
+   ```
+   Or:
+   ```bash
+   .venv/bin/uvicorn app.main:app --reload
    ```
 
    **Note:** If you get "MONGODB_URI required" error, make sure `.env` file exists with:
