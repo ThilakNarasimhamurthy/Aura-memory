@@ -53,7 +53,8 @@ echo -e "${GREEN}✓${NC} uv is installed"
 
 
 # Set default port if not provided
-PORT=${1:-8080}
+# Default to 8090 to avoid conflict with frontend (8080) and backend (8000)
+PORT=${1:-8090}
 HOST=${2:-localhost}
 
 # Set configuration file path (required for MCP HTTP mode)

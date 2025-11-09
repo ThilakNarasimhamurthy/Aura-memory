@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { TopNav } from "@/components/dashboard/TopNav";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,10 +9,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Loader2, Calendar, Clock, Target, Image as ImageIcon, MessageSquare, Sparkles, Play, Download, Phone, PhoneCall, User, CheckCircle, XCircle, Send, Bot, Mail, MailCheck } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { Loader2, Calendar, Clock, Target, Image as ImageIcon, MessageSquare, Sparkles, Play, Download, Phone, PhoneCall, User, CheckCircle, XCircle, Send, Bot, Mail, MailCheck, ArrowRight, ArrowDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { ragApi, playAudio, downloadAudio, campaignsApi, customersApi, phoneCallApi, emailApi, type CustomerDocument, type PhoneCallRequest, type EmailRecipient, type BulkEmailRequest, type CallConversation } from "@/lib/api";
+import { ragApi, playAudio, downloadAudio, campaignsApi, customersApi, phoneCallApi, emailApi, memoriesApi, type CustomerDocument, type PhoneCallRequest, type EmailRecipient, type BulkEmailRequest, type CallConversation } from "@/lib/api";
 
 interface DayCampaign {
   day: string;
@@ -30,6 +29,7 @@ export default function CampaignAutomation() {
   const [campaigns7Days, setCampaigns7Days] = useState<DayCampaign[]>([]);
   const [campaigns30Days, setCampaigns30Days] = useState<DayCampaign[]>([]);
   const [festivalCampaigns, setFestivalCampaigns] = useState<DayCampaign[]>([]);
+  
   // Customer calling state
   const [customers, setCustomers] = useState<Array<CustomerDocument & { customer_id: string }>>([]);
   const [top5Customers, setTop5Customers] = useState<Array<CustomerDocument & { customer_id: string }>>([]);
@@ -39,12 +39,15 @@ export default function CampaignAutomation() {
   const [manualCustomerName, setManualCustomerName] = useState("");
   const [callingLoading, setCallingLoading] = useState(false);
   const [callScript, setCallScript] = useState<string>("");
+  const [editedCallScript, setEditedCallScript] = useState<string>(""); // Editable transcript
   const [callAudio, setCallAudio] = useState<Blob | null>(null);
   const [callFeedback, setCallFeedback] = useState<"positive" | "negative" | null>(null);
   const [conversationLog, setConversationLog] = useState<Array<{role: string; content: string}>>([]);
   const [activeCall, setActiveCall] = useState<{callSid: string; status: string; phoneNumber: string} | null>(null);
   const [callStatusInterval, setCallStatusInterval] = useState<NodeJS.Timeout | null>(null);
   const [callConversation, setCallConversation] = useState<CallConversation | null>(null);
+  const [customerResponses, setCustomerResponses] = useState<Array<{timestamp: Date; content: string}>>([]); // Real-time customer responses
+  const [isEditingScript, setIsEditingScript] = useState(false);
   
   // Chat conversation for campaign generation
   const [chatMessages, setChatMessages] = useState<Array<{role: "user" | "assistant"; content: string; timestamp: Date}>>([]);
@@ -59,32 +62,60 @@ export default function CampaignAutomation() {
   const [emailLoading, setEmailLoading] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [emailResults, setEmailResults] = useState<{sent: number; failed: number} | null>(null);
+  const [autoGenerateEmail, setAutoGenerateEmail] = useState(false);
+  
+  // Conversation storage
+  const [conversationHistory, setConversationHistory] = useState<string>("");
+  const [storingConversation, setStoringConversation] = useState(false);
   
   const { toast } = useToast();
 
+  // Store conversation in MemMachine
+  const storeConversationInMemory = async (conversationText: string, customerId?: string) => {
+    if (!conversationText.trim()) return;
+    
+    setStoringConversation(true);
+    try {
+      const memoryContent = `Campaign Automation Conversation - ${new Date().toISOString()}\n\n${conversationText}`;
+      await memoriesApi.add(memoryContent, customerId || "campaign-automation");
+      
+    } catch (error: any) {
+      toast({
+        title: "Memory Storage Warning",
+        description: "Failed to store conversation in memory: " + (error.message || "Unknown error"),
+        variant: "destructive",
+      });
+    } finally {
+      setStoringConversation(false);
+    }
+  };
 
   // Load customers for calling - prioritize most active in campaigns
-  const loadCustomersForCalling = async () => {
+  // This function is called manually or when data needs to be refreshed
+  const loadCustomersForCalling = async (forceRefresh: boolean = false) => {
+    // Don't reload if data was recently loaded and forceRefresh is false
+    if (!forceRefresh && dataLoaded && lastLoadTime && Date.now() - lastLoadTime < 5 * 60 * 1000) {
+      return;
+    }
+    
     try {
-      // Query specifically for customers with high campaign engagement
       const response = await ragApi.campaignQuery({
         query: 'Find customers who have the highest campaign engagement. Show customers with the most campaign responses, conversions, email open rates, and click rates. Prioritize customers who responded to multiple campaigns and converted.',
         k: 20,
       });
       
-      // Ensure documents array exists - API layer should provide mock data if empty
       const documents = Array.isArray(response?.documents) ? response.documents : [];
       
-      // Even if empty, API should have provided mock data, but handle gracefully
       if (documents.length === 0) {
-        console.warn("No customers found, API should have provided mock data");
         setCustomers([]);
         setTop5Customers([]);
-        toast({
-          title: "No Customers Found",
-          description: response?.answer || "No customers with campaign engagement found. Using mock data fallback.",
-          variant: "default",
-        });
+        if (forceRefresh) {
+          toast({
+            title: "No Customers Found",
+            description: response?.answer || "No customers with campaign engagement found.",
+            variant: "default",
+          });
+        }
         return;
       }
       
@@ -92,7 +123,6 @@ export default function CampaignAutomation() {
         .map(doc => doc.metadata as CustomerDocument)
         .filter(c => c.customer_id && (c.email || c.phone))
         .map(c => ({ ...c, customer_id: String(c.customer_id || "") }))
-        // Filter out customers with zero campaign engagement
         .filter(c => {
           const hasEngagement = 
             (c.responded_to_campaigns && c.responded_to_campaigns > 0) ||
@@ -102,15 +132,13 @@ export default function CampaignAutomation() {
           return hasEngagement;
         });
       
-      // Sort by campaign engagement score (most active first)
       customerList.sort((a, b) => {
-        // Calculate comprehensive engagement score
         const aScore = 
-          (a.responded_to_campaigns || 0) * 3 +  // Responses weighted higher
-          (a.converted_campaigns || 0) * 5 +     // Conversions weighted highest
-          (a.email_open_rate || 0) / 10 +        // Open rate bonus
-          (a.email_click_rate || 0) / 10 +       // Click rate bonus
-          (a.total_spent || 0) / 100;            // Spending as tiebreaker
+          (a.responded_to_campaigns || 0) * 3 +
+          (a.converted_campaigns || 0) * 5 +
+          (a.email_open_rate || 0) / 10 +
+          (a.email_click_rate || 0) / 10 +
+          (a.total_spent || 0) / 100;
         
         const bScore = 
           (b.responded_to_campaigns || 0) * 3 +
@@ -119,36 +147,37 @@ export default function CampaignAutomation() {
           (b.email_click_rate || 0) / 10 +
           (b.total_spent || 0) / 100;
         
-        return bScore - aScore; // Descending order
+        return bScore - aScore;
       });
       
       setCustomers(customerList);
-      
-      // Get top 5 customers for one-by-one calling
-      const top5 = customerList.slice(0, 5);
+      const top5 = customerList;
       setTop5Customers(top5);
       
-      // Auto-select the most active customer (first in sorted list) if in auto mode
-      if (customerList.length > 0 && !selectedCustomer && callingMode === "auto") {
+      // Update load time
+      setDataLoaded(true);
+      setLastLoadTime(Date.now());
+      
+      // Only auto-select customer on initial load, not on refresh
+      if (!forceRefresh && customerList.length > 0 && !selectedCustomer && callingMode === "auto") {
         const mostActive = customerList[0];
         setSelectedCustomer(mostActive.customer_id);
+      }
+      
+      if (forceRefresh) {
         toast({
-          title: "Top 5 Customers Loaded",
-          description: `Loaded ${top5.length} most engaged customers. Select one to call, or switch to manual mode to add a phone number.`,
-        });
-      } else if (customerList.length === 0) {
-        toast({
-          title: "No Active Customers Found",
-          description: "No customers with campaign engagement found. Try manual mode to add a phone number.",
-          variant: "destructive",
+          title: "Customers Refreshed",
+          description: `Loaded ${customerList.length} customers with campaign engagement.`,
         });
       }
     } catch (error: any) {
-      toast({
-        title: "Error Loading Customers",
-        description: error.message || "Failed to load customers.",
-        variant: "destructive",
-      });
+      if (forceRefresh) {
+        toast({
+          title: "Error Loading Customers",
+          description: error.message || "Failed to load customers.",
+          variant: "destructive",
+        });
+      }
     }
   };
 
@@ -157,7 +186,6 @@ export default function CampaignAutomation() {
     let customer: (CustomerDocument & { customer_id: string }) | null = null;
     
     if (callingMode === "manual") {
-      // Manual mode - use provided phone number
       if (!manualPhoneNumber.trim()) {
         toast({
           title: "Phone Number Required",
@@ -167,7 +195,6 @@ export default function CampaignAutomation() {
         return;
       }
       
-      // Create a customer object from manual input
       customer = {
         customer_id: "manual-" + Date.now(),
         first_name: manualCustomerName.split(" ")[0] || "",
@@ -182,7 +209,6 @@ export default function CampaignAutomation() {
         lifetime_value: 0,
       };
     } else {
-      // Auto mode - use selected customer
       const idToUse = customerId || selectedCustomer;
       if (!idToUse) {
         toast({
@@ -208,25 +234,29 @@ export default function CampaignAutomation() {
 
     setCallingLoading(true);
     setCallScript("");
+    setEditedCallScript(""); // Clear edited script
     setCallAudio(null);
     setCallFeedback(null);
     setConversationLog([]);
+    setIsEditingScript(false); // Reset edit mode
+    setCustomerResponses([]); // Clear customer responses
 
     try {
-      // Generate personalized call script based on customer's campaign engagement
       const customerName = customer.first_name && customer.last_name 
         ? `${customer.first_name} ${customer.last_name}`
         : customer.first_name || customer.email || "the customer";
       
       const phoneNumber = customer.phone || manualPhoneNumber || "N/A";
       
-      let query = `Generate a natural phone conversation script to call ${customerName} at ${phoneNumber} to ask about our recent campaigns. `;
+      // Build conversation context from chat messages for script generation
+      const conversationContext = chatMessages
+        .map(msg => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
+        .join("\n\n");
+      
+      let query = `Generate a phone call script for an AGENT to call ${customerName} at ${phoneNumber} based on the following campaign conversation:\n\n${conversationContext}\n\n`;
       
       if (callingMode === "auto" && customer.responded_to_campaigns) {
-        // Has campaign history
-        query += `
-      
-Customer details:
+        query += `Customer details:
 - Total purchases: ${customer.total_purchases || 0}
 - Responded to ${customer.responded_to_campaigns || 0} campaigns
 - Converted ${customer.converted_campaigns || 0} campaigns
@@ -234,26 +264,40 @@ Customer details:
 - Preferred contact: ${customer.preferred_contact_method || 'Email'}
 - Favorite product: ${customer.favorite_product_category || 'N/A'}
 
-Create a friendly, conversational script that:
-1. Introduces the agent
-2. Asks if they received our recent campaigns
-3. Asks about their experience with the campaigns
-4. Asks if the campaigns influenced their purchases
-5. Thanks them for their time
+IMPORTANT: Generate ONLY the AGENT's side of the conversation. Do NOT include customer responses.
+
+Create a friendly, conversational script that includes ONLY what the AGENT will say:
+1. Agent introduces themselves
+2. Agent references the campaign conversation context
+3. Agent asks about their experience with the campaigns
+4. Agent gathers feedback on campaign effectiveness
+5. Agent thanks them for their time
+
+Format: Write only the agent's lines, one after another. Do NOT include customer responses like "Customer: ..." or "${customerName}: ...". The customer responses will be captured during the actual call via Twilio.
+
+Example format:
+Agent: Hello, this is [Agent Name] calling from [Company Name]. Is this ${customerName}?
+Agent: Great! I wanted to take a moment to discuss our recent campaigns...
+Agent: [Continue with agent's questions and statements]
 
 Keep it natural and conversational, suitable for a phone call.`;
       } else {
-        // Manual call or no campaign history
-        query += `
-      
-This is a ${callingMode === "manual" ? "manual" : "new"} customer call. 
+        query += `This is a ${callingMode === "manual" ? "manual" : "new"} customer call based on campaign conversation.
 
-Create a friendly, conversational script that:
-1. Introduces the agent
-2. Asks if they are familiar with our brand/campaigns
-3. Asks about their experience with marketing campaigns in general
-4. Asks if they would be interested in our campaigns
-5. Thanks them for their time
+IMPORTANT: Generate ONLY the AGENT's side of the conversation. Do NOT include customer responses.
+
+Create a friendly, conversational script that includes ONLY what the AGENT will say:
+1. Agent introduces themselves
+2. Agent references the campaign conversation
+3. Agent asks about their experience with marketing campaigns
+4. Agent gathers feedback
+5. Agent thanks them for their time
+
+Format: Write only the agent's lines, one after another. Do NOT include customer responses. The customer responses will be captured during the actual call.
+
+Example format:
+Agent: Hello, this is [Agent Name] calling from [Company Name]...
+Agent: [Continue with agent's questions and statements]
 
 Keep it natural and conversational, suitable for a phone call.`;
       }
@@ -263,23 +307,92 @@ Keep it natural and conversational, suitable for a phone call.`;
         k: 5,
       });
 
-      const script = response.answer;
+      let script = response.answer || "";
+      
+      // Post-process script to remove any customer responses that might have been generated
+      // Clean up lines that contain customer responses (e.g., "Henry:", "Customer:", etc.)
+      const customerNameFirst = customer.first_name || "";
+      const customerNameFull = customer.first_name && customer.last_name 
+        ? `${customer.first_name} ${customer.last_name}` 
+        : customerNameFirst;
+      
+      // Split script into lines and filter out customer responses
+      const scriptLines = script.split('\n');
+      const agentLines: string[] = [];
+      
+      for (const line of scriptLines) {
+        const trimmedLine = line.trim();
+        
+        // Skip empty lines
+        if (!trimmedLine) {
+          continue;
+        }
+        
+        // Skip lines that start with customer name or "Customer:" or similar patterns
+        const lowerLine = trimmedLine.toLowerCase();
+        if (
+          lowerLine.startsWith(`${customerNameFirst.toLowerCase()}:`) ||
+          lowerLine.startsWith(`${customerNameFull.toLowerCase()}:`) ||
+          lowerLine.startsWith('customer:') ||
+          lowerLine.startsWith('henry:') ||
+          lowerLine.startsWith('alice:') ||
+          lowerLine.startsWith('bob:') ||
+          lowerLine.startsWith('charlie:') ||
+          lowerLine.startsWith('diana:') ||
+          lowerLine.startsWith('eve:') ||
+          lowerLine.startsWith('frank:') ||
+          lowerLine.startsWith('grace:') ||
+          lowerLine.startsWith('john:') ||
+          lowerLine.startsWith('jane:') ||
+          // Skip lines that are clearly customer responses (short affirmative responses)
+          (trimmedLine.match(/^(yes|no|okay|ok|sure|thanks|thank you|that sounds good|great|awesome|perfect|i see|alright|i understand)/i) && 
+           !trimmedLine.startsWith('Agent:') && !trimmedLine.startsWith('**'))
+        ) {
+          // This is a customer response - skip it
+          continue;
+        }
+        
+        // Keep agent lines and other content
+        agentLines.push(line);
+      }
+      
+      // Rejoin lines, ensuring all agent lines are properly formatted
+      script = agentLines.join('\n').trim();
+      
+      // If script is empty or too short, provide a fallback
+      if (!script || script.length < 50) {
+        script = `Agent: Hello, this is calling from our marketing team. Is this ${customerNameFull || customerNameFirst || 'the customer'}?
+
+Agent: Great! I wanted to take a moment to discuss our recent campaigns with you. Based on our conversation about ${conversationContext.substring(0, 100)}...
+
+Agent: I'd love to hear your thoughts on how our campaigns have been working for you. Have you found them useful?
+
+Agent: Thank you for your time and feedback. We really appreciate it!`;
+      }
+      
       setCallScript(script);
+      setEditedCallScript(script); // Initialize editable script with generated script
       setConversationLog([{ role: "agent", content: script }]);
 
-      // Generate audio for the call script
-      const audio = await ragApi.campaignVoice({
-        query: script,
-        k: 5,
-      });
-      setCallAudio(audio);
+      // Try to generate audio for the call script (optional - uses ElevenLabs)
+      // If it fails (e.g., quota exceeded), the call will still work with Twilio's built-in TTS
+      try {
+        const audio = await ragApi.campaignVoice({
+          query: script,
+          k: 5,
+        });
+        setCallAudio(audio);
+      } catch (audioError: any) {
+        // Don't show error toast - audio is optional, call will work without it
+        // Twilio will use its built-in TTS during the actual call
+        setCallAudio(null);
+      }
 
       toast({
         title: "Call Script Generated",
-        description: `Script ready for ${customer.first_name || customer.email}. You can now make the actual call.`,
+        description: `Script ready for ${customer.first_name || customer.email}. You can now make the actual call.${callAudio ? " Audio preview available." : ""}`,
       });
     } catch (error: any) {
-      console.error("Error initiating call:", error);
       toast({
         title: "Call Failed",
         description: error.message || "Failed to generate call script. Please try again.",
@@ -306,6 +419,18 @@ Keep it natural and conversational, suitable for a phone call.`;
 
   // Make actual phone call
   const makeActualCall = async () => {
+    // Use edited script if available, otherwise use generated script
+    const scriptToUse = editedCallScript.trim() || callScript.trim();
+    
+    if (!scriptToUse) {
+      toast({
+        title: "Call Script Required",
+        description: "Please generate a call script first or enter a transcript.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     let customer: (CustomerDocument & { customer_id: string }) | null = null;
     let phoneNumber = "";
 
@@ -352,11 +477,13 @@ Keep it natural and conversational, suitable for a phone call.`;
     }
 
     setCallingLoading(true);
+    setCustomerResponses([]); // Clear previous responses
     try {
       const callRequest: PhoneCallRequest = {
         phone_number: phoneNumber,
         customer_name: customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : manualCustomerName,
         customer_id: customer?.customer_id,
+        script_text: scriptToUse, // Use the edited/generated script
       };
 
       const result = await phoneCallApi.initiate(callRequest);
@@ -384,19 +511,37 @@ Keep it natural and conversational, suitable for a phone call.`;
                 setCallConversation(conversation);
                 setConversationLog(conversation.conversation_history);
                 
+                // Extract customer responses from conversation (real-time responses from actual call)
+                const customerResponsesList = conversation.conversation_history
+                  .filter(ex => ex.role === "customer")
+                  .map(ex => ({
+                    timestamp: new Date(),
+                    content: ex.content,
+                  }));
+                setCustomerResponses(customerResponsesList);
+                
+                // Store full conversation in MemMachine
+                const fullConversationText = `Phone Call Conversation - ${new Date().toISOString()}\n\nCustomer: ${customer?.first_name || manualCustomerName || phoneNumber}\nPhone: ${phoneNumber}\n\nAgent Script (Transcript):\n${scriptToUse}\n\nConversation:\n${conversation.conversation_history.map(exchange => `${exchange.role}: ${exchange.content}`).join("\n\n")}\n\nCustomer Responses (Real-time):\n${conversation.customer_responses.join("\n")}`;
+                await storeConversationInMemory(fullConversationText, customer?.customer_id);
+                
+                // Refresh customer data after storing new conversation (new data in database)
+                // This ensures the UI reflects the updated information
+                setTimeout(() => {
+                  loadCustomersForCalling(true); // Force refresh after new data is stored
+                  loadCustomersForEmail(true); // Force refresh email customers too
+                }, 1000); // Small delay to ensure data is stored
+                
                 toast({
                   title: "Call Completed!",
-                  description: `Conversation recorded. ${conversation.total_exchanges} exchanges captured.`,
+                  description: `Conversation recorded and stored. ${conversation.total_exchanges} exchanges captured. ${customerResponsesList.length} customer responses received.`,
                 });
               } catch (error) {
-                console.error("Error fetching conversation:", error);
               }
             }
           }
         } catch (error) {
-          console.error("Error checking call status:", error);
         }
-      }, 2000); // Check every 2 seconds
+      }, 2000);
       
       setCallStatusInterval(interval);
 
@@ -405,13 +550,15 @@ Keep it natural and conversational, suitable for a phone call.`;
         description: `Calling ${phoneNumber}. The customer will receive the call shortly.`,
       });
 
-      // Add to conversation log
-      setConversationLog(prev => [...prev, {
+      // Initialize conversation log with agent script
+      setConversationLog([{
+        role: "agent",
+        content: scriptToUse,
+      }, {
         role: "system",
         content: `Call initiated to ${phoneNumber} at ${new Date().toLocaleTimeString()}`
       }]);
     } catch (error: any) {
-      console.error("Error making call:", error);
       toast({
         title: "Call Failed",
         description: error.message || "Failed to initiate call. Please check Twilio configuration.",
@@ -422,23 +569,30 @@ Keep it natural and conversational, suitable for a phone call.`;
     }
   };
 
-  const recordCallFeedback = (feedback: "positive" | "negative") => {
+  const recordCallFeedback = async (feedback: "positive" | "negative") => {
     setCallFeedback(feedback);
     const customer = customers.find(c => c.customer_id === selectedCustomer) || 
                      top5Customers.find(c => c.customer_id === selectedCustomer);
     
+    // Store feedback in MemMachine
+    const feedbackText = `Campaign Feedback - ${new Date().toISOString()}\n\nCustomer: ${customer?.first_name || manualCustomerName || 'Unknown'}\nFeedback: ${feedback === "positive" ? "Campaign is working well" : "Campaign needs improvement"}\n\nCall Conversation:\n${callConversation ? callConversation.conversation_history.map(ex => `${ex.role}: ${ex.content}`).join("\n\n") : conversationLog.map(log => `${log.role}: ${log.content}`).join("\n\n")}`;
+    await storeConversationInMemory(feedbackText, customer?.customer_id);
+    
     toast({
       title: feedback === "positive" ? "Campaign Working!" : "Campaign Needs Improvement",
-      description: `Feedback recorded for ${customer?.first_name || customer?.email || manualCustomerName || 'customer'}. Campaign effectiveness: ${feedback === "positive" ? "Good" : "Needs attention"}`,
+      description: `Feedback recorded and stored for ${customer?.first_name || customer?.email || manualCustomerName || 'customer'}.`,
     });
 
-    // Add to conversation log
     setConversationLog(prev => [...prev, {
       role: "feedback",
       content: `Customer feedback: ${feedback === "positive" ? "Campaign is working well" : "Campaign needs improvement"}`
     }]);
   };
 
+  // Track if data has been loaded to prevent unnecessary reloads
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [lastLoadTime, setLastLoadTime] = useState<number | null>(null);
+  
   // Cleanup interval on unmount
   useEffect(() => {
     return () => {
@@ -448,41 +602,333 @@ Keep it natural and conversational, suitable for a phone call.`;
     };
   }, [callStatusInterval]);
 
-  // Load customers on mount
+  // Load customers only on initial mount, not on every tab switch
+  // Only reload if data hasn't been loaded yet, or if explicitly requested
   useEffect(() => {
-    loadCustomersForCalling();
+    // Check if we should load data
+    // Only load if:
+    // 1. Data hasn't been loaded yet (first mount)
+    // 2. OR last load was more than 5 minutes ago (stale data)
+    // 3. OR data was explicitly cleared (dataLoaded is false)
+    const shouldLoad = !dataLoaded || 
+      (lastLoadTime && Date.now() - lastLoadTime > 5 * 60 * 1000); // 5 minutes
     
-    // Initialize chat with welcome message
-    setChatMessages([{
-      role: "assistant",
-      content: "Hello! I'm your campaign generation assistant. I can help you create marketing campaigns based on your customer data. \n\nYou can ask me to:\n- Generate campaigns for specific periods (7 days, 30 days, festivals)\n- Create campaigns targeting specific customer segments\n- Design campaigns based on customer preferences\n- Generate campaign content, timing, and channels\n\nWhat kind of campaign would you like to create?",
-      timestamp: new Date(),
-    }]);
-  }, []);
+    if (shouldLoad) {
+      loadCustomersForCalling();
+      loadCustomersForEmail();
+      setDataLoaded(true);
+      setLastLoadTime(Date.now());
+    }
+    
+    // Initialize chat with welcome message only if chat is empty
+    if (chatMessages.length === 0) {
+      setChatMessages([{
+        role: "assistant",
+        content: "Hello! I'm your campaign generation assistant. I can help you create marketing campaigns based on your customer data. \n\nYou can ask me to:\n- Generate campaigns for specific periods (7 days, 30 days, festivals)\n- Create campaigns targeting specific customer segments\n- Design campaigns based on customer preferences\n- Generate campaign content, timing, and channels\n\nWhat kind of campaign would you like to create?",
+        timestamp: new Date(),
+      }]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty dependency array - only run on mount
 
-  // Load customers for email sending
-  const loadCustomersForEmail = async () => {
+  // Track if email generation is in progress to prevent multiple simultaneous calls
+  const [isGeneratingEmail, setIsGeneratingEmail] = useState(false);
+  const emailGeneratedRef = useRef(false);
+  
+  // Auto-generate email from conversation when chat messages change
+  // Also auto-generate when campaigns are generated
+  useEffect(() => {
+    // Don't generate if already generating or already generated
+    if (isGeneratingEmail || emailGeneratedRef.current) {
+      return;
+    }
+    
+    // Auto-generate if enabled and we have enough conversation
+    if (autoGenerateEmail && chatMessages.length > 2) {
+      // Check if email body is empty before generating
+      const hasEmailContent = emailSubject.trim().length > 0 || emailBody.trim().length > 0;
+      if (!hasEmailContent) {
+        // Small delay to ensure state is updated, with debouncing
+        const timeoutId = setTimeout(() => {
+          if (!isGeneratingEmail && !emailGeneratedRef.current) {
+            generateEmailFromConversation();
+          }
+        }, 1000); // Increased delay for debouncing
+        return () => clearTimeout(timeoutId);
+      }
+    }
+    
+    // Also auto-generate when campaigns are generated (regardless of auto-generate setting)
+    // This ensures email is always generated when campaigns are created
+    // Only generate if email body is empty to avoid regenerating unnecessarily
+    if (generatedCampaigns.length > 0 && chatMessages.length > 2) {
+      // Check if email body is empty (use a ref or state check)
+      const hasEmailContent = emailSubject.trim().length > 0 || emailBody.trim().length > 0;
+      if (!hasEmailContent && !isGeneratingEmail && !emailGeneratedRef.current) {
+        const timeoutId = setTimeout(() => {
+          if (!isGeneratingEmail && !emailGeneratedRef.current) {
+            generateEmailFromConversation();
+          }
+        }, 2000); // Wait for campaigns to be fully set
+        return () => clearTimeout(timeoutId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatMessages, autoGenerateEmail, generatedCampaigns.length]); // Removed emailSubject and emailBody to prevent infinite loop
+
+  // Generate email from conversation
+  const generateEmailFromConversation = async () => {
+    // Prevent multiple simultaneous calls
+    if (isGeneratingEmail || emailGeneratedRef.current) {
+      return;
+    }
+    
+    if (chatMessages.length < 2) {
+      toast({
+        title: "Insufficient Conversation",
+        description: "Please have a conversation first to generate email content.",
+        variant: "default",
+      });
+      return;
+    }
+    
+    setIsGeneratingEmail(true);
+    setEmailLoading(true);
     try {
-      const response = await customersApi.findActive(50);
+      // Build conversation context with campaign details
+      const conversationText = chatMessages
+        .map(msg => `${msg.role === "user" ? "User" : "Assistant"}: ${msg.content}`)
+        .join("\n\n");
       
-      // Ensure documents array exists - API layer should provide mock data if empty
-      const documents = Array.isArray(response?.documents) ? response.documents : [];
+      // Include generated campaigns if available
+      let campaignContext = "";
+      if (generatedCampaigns.length > 0) {
+        campaignContext = `\n\nGenerated Campaigns:\n${generatedCampaigns.map((c, idx) => 
+          `${idx + 1}. ${c.day} (${c.date}): ${c.caption}\n   Channel: ${c.channel}\n   Story: ${c.story}\n   Timing: ${c.timing}`
+        ).join("\n\n")}`;
+      }
       
-      // Even if empty, API should have provided mock data, but handle gracefully
-      if (documents.length === 0) {
-        console.warn("No email customers found, API should have provided mock data");
+      // More explicit query for email generation
+      const emailQuery = `Generate a professional marketing email based on the following campaign conversation and details:
+
+CONVERSATION:
+${conversationText}
+${campaignContext}
+
+REQUIREMENTS:
+1. Create a compelling subject line that captures attention and reflects the campaign theme
+2. Write a detailed email body that:
+   - Introduces the campaign or offer
+   - Highlights key benefits and value propositions
+   - Includes specific details from the conversation
+   - Has a clear call-to-action
+   - Uses a professional but engaging tone
+   - Is personalized for customers (use placeholders like {{first_name}}, {{favorite_product}})
+3. Make it suitable for sending to top customers who have high engagement
+
+FORMAT YOUR RESPONSE EXACTLY AS:
+Subject: [your subject line here]
+
+Body:
+[your email body here - multiple paragraphs are fine]
+
+Make sure the email body is comprehensive, engaging, and includes all relevant campaign information from the conversation.`;
+      
+      const response = await ragApi.campaignQuery({
+        query: emailQuery,
+        k: 15, // Get more context for better email generation
+      });
+      
+      
+      // Parse subject and body from response - try multiple patterns
+      const answer = response.answer || "";
+      
+      if (!answer || answer.trim().length === 0) {
+        throw new Error("Empty response from email generation API");
+      }
+      
+      // Try different patterns to extract subject and body
+      let subjectMatch = answer.match(/Subject:\s*(.+?)(?:\n|$)/i) || 
+                        answer.match(/SUBJECT:\s*(.+?)(?:\n|$)/i) ||
+                        answer.match(/^Subject:\s*(.+?)$/im);
+      
+      // Try different patterns for body extraction
+      let bodyMatch = answer.match(/Body:\s*([\s\S]+?)(?:\n\nSubject:|$)/i) ||
+                     answer.match(/Body:\s*([\s\S]+?)(?:\n*$)/i) ||
+                     answer.match(/BODY:\s*([\s\S]+)/i) ||
+                     answer.match(/Body:\s*([\s\S]+)/i);
+      
+      // If no body match but we have content after "Body:", try to extract everything after it
+      if (!bodyMatch && answer.includes("Body:")) {
+        const bodyIndex = answer.indexOf("Body:");
+        const bodyContent = answer.substring(bodyIndex + 5).trim();
+        if (bodyContent.length > 0) {
+          bodyMatch = [null, bodyContent];
+        }
+      }
+      
+      // If still no body match, check if there's content after subject
+      if (!bodyMatch && subjectMatch) {
+        const subjectIndex = answer.indexOf(subjectMatch[0]);
+        const contentAfterSubject = answer.substring(subjectIndex + subjectMatch[0].length).trim();
+        // Remove "Body:" prefix if present
+        const cleanedContent = contentAfterSubject.replace(/^Body:\s*/i, "").trim();
+        if (cleanedContent.length > 0) {
+          bodyMatch = [null, cleanedContent];
+        }
+      }
+      
+      // Extract subject (will be set together with body below)
+      const finalSubject = subjectMatch && subjectMatch[1]
+        ? subjectMatch[1].trim()
+        : (generatedCampaigns.length > 0 
+          ? `Exciting Campaign Update - ${generatedCampaigns[0].caption.substring(0, 50)}...`
+          : `Campaign Update - ${new Date().toLocaleDateString()}`);
+      
+      // Extract body - prioritize extracted body, fallback to full answer
+      let finalBody = "";
+      if (bodyMatch && bodyMatch[1] && bodyMatch[1].trim().length > 0) {
+        finalBody = bodyMatch[1].trim();
+      } else if (answer.trim().length > 0) {
+        // Use full answer if we can't parse, but remove subject line if present
+        let bodyContent = answer;
+        if (subjectMatch) {
+          bodyContent = bodyContent.replace(subjectMatch[0], "").trim();
+        }
+        // Remove "Body:" prefix if present
+        bodyContent = bodyContent.replace(/^Body:\s*/i, "").trim();
+        finalBody = bodyContent;
+      } else {
+        // Last resort: generate a basic email body from conversation
+        finalBody = `Dear {{first_name}},
+
+We're excited to share our latest campaign with you!
+
+${conversationText.split('\n').slice(0, 5).join('\n')}
+
+Thank you for being a valued customer!
+
+Best regards,
+The Marketing Team`;
+      }
+      
+      // Set both subject and body together to prevent multiple state updates
+      setEmailSubject(finalSubject);
+      setEmailBody(finalBody);
+      
+      // Mark as generated to prevent re-generation
+      emailGeneratedRef.current = true;
+      
+      
+      toast({
+        title: "Email Generated",
+        description: `Email content generated successfully. Subject and body are ready for review.`,
+      });
+    } catch (error: any) {
+      
+      // Generate a fallback email body based on conversation
+      const fallbackSubject = generatedCampaigns.length > 0
+        ? `Campaign Update - ${generatedCampaigns[0].caption.substring(0, 40)}`
+        : `Campaign Update - ${new Date().toLocaleDateString()}`;
+      
+      const fallbackBody = `Dear {{first_name}},
+
+We're excited to share our latest campaign with you!
+
+${chatMessages
+  .filter(msg => msg.role === "assistant")
+  .map(msg => msg.content)
+  .join("\n\n")
+  .substring(0, 500)}
+
+${generatedCampaigns.length > 0 
+  ? `\n\nCampaign Details:\n${generatedCampaigns.map(c => `- ${c.caption}`).join("\n")}`
+  : ""}
+
+We hope you'll take advantage of this special offer!
+
+Best regards,
+The Marketing Team`;
+      
+      setEmailSubject(fallbackSubject);
+      setEmailBody(fallbackBody);
+      
+      // Mark as generated even with fallback
+      emailGeneratedRef.current = true;
+      
+      toast({
+        title: "Email Generated (Fallback)",
+        description: "Email generated using fallback method. Please review and edit as needed.",
+        variant: "default",
+      });
+    } finally {
+      setIsGeneratingEmail(false);
+      setEmailLoading(false);
+    }
+  };
+
+  // Load top 50 customers for email sending (sorted by engagement)
+  // This function is called manually or when data needs to be refreshed
+  const loadCustomersForEmail = async (forceRefresh: boolean = false) => {
+    // Don't reload if data was recently loaded and forceRefresh is false
+    if (!forceRefresh && dataLoaded && lastLoadTime && Date.now() - lastLoadTime < 5 * 60 * 1000) {
+      return;
+    }
+    
+    try {
+      
+      // Use structured API first (much faster than RAG)
+      let customerData: CustomerDocument[] = [];
+      try {
+        const response = await customersApi.findActive(1000); // Get more than 50 to sort and filter
+        const documents = Array.isArray(response?.documents) ? response.documents : [];
+        customerData = documents.map(doc => doc.metadata as CustomerDocument);
+      } catch (structuredError) {
+        // Fallback to RAG if structured API fails
+        try {
+          const response = await ragApi.campaignQuery({
+            query: 'Find customers with email addresses who have high campaign engagement, email open rates, and conversions.',
+            k: 100, // Get more to have enough after filtering
+          });
+          const documents = Array.isArray(response?.documents) ? response.documents : [];
+          customerData = documents.map(doc => doc.metadata as CustomerDocument);
+        } catch (ragError) {
+          throw ragError;
+        }
+      }
+      
+      if (customerData.length === 0) {
         setEmailRecipients([]);
-        toast({
-          title: "No Customers Found",
-          description: response?.answer || "No customers with email addresses found. Using mock data fallback.",
-          variant: "default",
-        });
+        if (forceRefresh) {
+          toast({
+            title: "No Customers Found",
+            description: "No customers with email addresses found.",
+            variant: "default",
+          });
+        }
         return;
       }
       
-      const customerList = documents
-        .map(doc => doc.metadata as CustomerDocument)
-        .filter(c => c.email && c.customer_id)
+      // Filter customers with emails, calculate engagement score, and sort
+      const customerList = customerData
+        .filter(c => c.email && c.customer_id) // Must have email and customer_id
+        .map(c => {
+          // Calculate comprehensive engagement score
+          const engagementScore = 
+            (c.responded_to_campaigns || 0) * 3 +
+            (c.converted_campaigns || 0) * 5 +
+            (c.email_open_rate || 0) / 10 +
+            (c.email_click_rate || 0) / 10 +
+            (c.total_spent || 0) / 100 +
+            (c.total_purchases || 0) * 2;
+          
+          return {
+            ...c,
+            engagementScore,
+          };
+        })
+        .sort((a, b) => (b.engagementScore || 0) - (a.engagementScore || 0))
+        .slice(0, 50) // Top 50 only
         .map(c => ({
           email: c.email!,
           customer_id: String(c.customer_id || ""),
@@ -496,16 +942,25 @@ Keep it natural and conversational, suitable for a phone call.`;
         }));
       
       setEmailRecipients(customerList);
-      toast({
-        title: "Customers Loaded",
-        description: `Loaded ${customerList.length} customers with email addresses for bulk sending.`,
-      });
+      
+      // Update load time
+      setDataLoaded(true);
+      setLastLoadTime(Date.now());
+      
+      if (forceRefresh) {
+        toast({
+          title: "Top 50 Customers Loaded",
+          description: `Loaded ${customerList.length} top customers with highest engagement for email sending.`,
+        });
+      }
     } catch (error: any) {
-      toast({
-        title: "Error Loading Customers",
-        description: error.message || "Failed to load customers.",
-        variant: "destructive",
-      });
+      if (forceRefresh) {
+        toast({
+          title: "Error Loading Customers",
+          description: error.message || "Failed to load customers. Please try again.",
+          variant: "destructive",
+        });
+      }
     }
   };
 
@@ -534,6 +989,10 @@ Keep it natural and conversational, suitable for a phone call.`;
     setEmailResults(null);
 
     try {
+      // Store email conversation in MemMachine
+      const emailConversationText = `Email Campaign Sent - ${new Date().toISOString()}\n\nSubject: ${emailSubject}\n\nBody: ${emailBody}\n\nRecipients: ${emailRecipients.length} customers\n\nCampaign Context:\n${chatMessages.map(msg => `${msg.role}: ${msg.content}`).join("\n\n")}`;
+      await storeConversationInMemory(emailConversationText, "campaign-automation");
+      
       const request: BulkEmailRequest = {
         recipients: emailRecipients,
         subject: emailSubject,
@@ -549,12 +1008,18 @@ Keep it natural and conversational, suitable for a phone call.`;
         failed: result.failed_count,
       });
 
+      // Refresh customer data after sending emails (new data in database)
+      // This ensures the UI reflects the updated information
+      setTimeout(() => {
+        loadCustomersForCalling(true); // Force refresh after new data is stored
+        loadCustomersForEmail(true); // Force refresh email customers too
+      }, 1000); // Small delay to ensure data is stored
+
       toast({
         title: "Emails Sent!",
         description: `Successfully sent ${result.sent_count} emails. ${result.failed_count > 0 ? `${result.failed_count} failed.` : ''}`,
       });
     } catch (error: any) {
-      console.error("Error sending emails:", error);
       toast({
         title: "Email Sending Failed",
         description: error.message || "Failed to send emails. Please try again.",
@@ -573,7 +1038,6 @@ Keep it natural and conversational, suitable for a phone call.`;
     setChatInput("");
     setChatLoading(true);
 
-    // Add user message to chat
     const newUserMessage = {
       role: "user" as const,
       content: userMessage,
@@ -582,7 +1046,6 @@ Keep it natural and conversational, suitable for a phone call.`;
     setChatMessages(prev => [...prev, newUserMessage]);
 
     try {
-      // Check if user wants to generate campaigns (7 days, 30 days, festival)
       const lowerMessage = userMessage.toLowerCase();
       let period: "7days" | "30days" | "festival" | null = null;
       
@@ -595,18 +1058,23 @@ Keep it natural and conversational, suitable for a phone call.`;
       }
 
       if (period) {
-        // Generate structured campaigns using Supabase function
-        const { data, error } = await supabase.functions.invoke("generate-campaign", {
-          body: {
-            type: "automation",
-            period,
-            historicalData: userMessage,
-          }
-        });
-
-        if (error) throw error;
-
-        const campaigns = data.campaigns || [];
+        // Use backend RAG API to generate campaign
+        const query = `Generate a ${period === "7days" ? "7-day" : period === "30days" ? "30-day" : "festival"} marketing campaign schedule. ${userMessage}. Create a detailed campaign plan with specific days, captions, and campaign types.`;
+        
+        const response = await ragApi.campaignQuery(query);
+        
+        // Format the response as campaign data
+        const campaigns = response.documents?.map((doc: any, index: number) => ({
+          day: `Day ${index + 1}`,
+          date: new Date(Date.now() + index * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          banner: null,
+          caption: doc.content || doc.metadata?.title || `Campaign ${index + 1}`,
+          story: doc.content || "",
+          timing: "09:00 AM",
+          channel: "Email",
+          channelReason: "Automated campaign for optimal engagement",
+          type: "automation"
+        })) || [];
         setGeneratedCampaigns(campaigns);
         
         const assistantMessage = {
@@ -616,12 +1084,24 @@ Keep it natural and conversational, suitable for a phone call.`;
         };
         setChatMessages(prev => [...prev, assistantMessage]);
 
-        toast({
-          title: "Campaign Generated!",
-          description: `${campaigns.length} campaigns created. You can now send emails or make calls.`,
-        });
+        // Store campaign generation in memory
+        const campaignText = `Campaign Generated - ${new Date().toISOString()}\n\nPeriod: ${period}\nCampaigns: ${campaigns.length}\n\nUser Request: ${userMessage}\n\nCampaigns:\n${campaigns.map(c => `${c.day} - ${c.caption}`).join("\n")}`;
+        await storeConversationInMemory(campaignText, "campaign-automation");
+
+        // Auto-generate email after campaign generation (only if not already generating and not already generated)
+        // This ensures email is always generated when campaigns are created
+        // The useEffect hook will handle this, but we can trigger it manually if needed
+        if (!isGeneratingEmail && !emailGeneratedRef.current) {
+          const hasEmailContent = emailSubject.trim().length > 0 || emailBody.trim().length > 0;
+          if (!hasEmailContent) {
+            setTimeout(() => {
+              if (!isGeneratingEmail && !emailGeneratedRef.current) {
+                generateEmailFromConversation();
+              }
+            }, 2000); // Wait for campaigns to be fully set
+          }
+        }
       } else {
-      // Use RAG to generate campaign response
       const response = await ragApi.campaignQuery({
         query: `Generate a marketing campaign based on this request: ${userMessage}. 
         
@@ -638,10 +1118,9 @@ Provide a detailed campaign plan with:
 - Timing recommendations
 - Channel selection
 - Expected outcomes`,
-        k: 15, // Get more context for campaign generation
+          k: 15,
       });
 
-      // Add assistant response
       const assistantMessage = {
         role: "assistant" as const,
         content: response.answer,
@@ -649,13 +1128,23 @@ Provide a detailed campaign plan with:
       };
       setChatMessages(prev => [...prev, assistantMessage]);
 
-        toast({
-          title: "Campaign Generated",
-          description: "Check the chat for campaign details. You can ask to generate structured campaigns (7 days, 30 days, festivals) or send emails.",
-        });
+        // Store conversation in memory
+        const conversationText = `User: ${userMessage}\n\nAssistant: ${response.answer}`;
+        await storeConversationInMemory(conversationText, "campaign-automation");
+
+        // Auto-generate email after campaign conversation (if auto-generate is enabled or if we have enough context)
+        if ((autoGenerateEmail || chatMessages.length >= 3) && !isGeneratingEmail && !emailGeneratedRef.current) {
+          const hasEmailContent = emailSubject.trim().length > 0 || emailBody.trim().length > 0;
+          if (!hasEmailContent) {
+            setTimeout(() => {
+              if (!isGeneratingEmail && !emailGeneratedRef.current) {
+                generateEmailFromConversation();
+              }
+            }, 1500);
+          }
+        }
       }
     } catch (error: any) {
-      console.error("Error in chat:", error);
       const errorMessage = {
         role: "assistant" as const,
         content: `I apologize, but I encountered an error: ${error.message || "Failed to generate campaign. Please try again."}`,
@@ -670,42 +1159,6 @@ Provide a detailed campaign plan with:
       });
     } finally {
       setChatLoading(false);
-    }
-  };
-
-  const generateCampaigns = async (period: "7days" | "30days" | "festival") => {
-    setLoading(true);
-    
-    try {
-      const { data, error } = await supabase.functions.invoke("generate-campaign", {
-        body: {
-          type: "automation",
-          period,
-          historicalData: "Based on coffee shop sales: Morning peak 7-9AM (Espresso, Latte), Afternoon 2-4PM (Cold Brew, Iced Coffee), Weekend brunch 10AM-12PM (Specialty drinks)"
-        }
-      });
-
-      if (error) throw error;
-
-      const setCampaignData = period === "7days" ? setCampaigns7Days : 
-                               period === "30days" ? setCampaigns30Days : 
-                               setFestivalCampaigns;
-      
-      setCampaignData(data.campaigns || []);
-      
-      toast({
-        title: "Campaign Schedule Generated!",
-        description: `AI has created your ${period === "7days" ? "7-day" : period === "30days" ? "30-day" : "festival"} campaign plan.`,
-      });
-    } catch (error: any) {
-      console.error("Error generating campaigns:", error);
-      toast({
-        title: "Generation Failed",
-        description: error.message || "Unable to generate campaigns. Please try again.",
-        variant: "destructive"
-      });
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -784,37 +1237,33 @@ Provide a detailed campaign plan with:
         <TopNav />
         
         <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-7xl mx-auto space-y-6">
-            <div className="flex items-center justify-between">
+          <div className="max-w-7xl mx-auto">
+            <div className="flex items-center justify-between mb-6">
               <div>
-                <h1 className="text-3xl font-bold text-foreground mb-2">Campaign Automation</h1>
+                <h1 className="text-3xl font-bold text-foreground mb-2">Campaign Automation Flow</h1>
                 <p className="text-muted-foreground">
-                  AI-powered campaign schedules with banners, captions, and optimal timing
+                  Continuous campaign workflow: Chat → Email → Calls. All conversations are stored automatically.
                 </p>
               </div>
             </div>
 
-            {/* Step 1: Chat Interface for Campaign Generation */}
+            {/* Main Layout: Content on Left, Flow Indicator on Right */}
+            <div className="flex gap-6">
+              {/* Left Side: Main Content Sections */}
+              <div className="flex-1 space-y-6">
+              {/* Section 1: Chat Interface */}
             <Card className="border-accent/30 bg-gradient-to-br from-accent/5 to-transparent">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
                     <CardTitle className="flex items-center gap-2">
                       <MessageSquare className="h-5 w-5 text-accent" />
-                      Step 1: Chat to Generate Campaigns
+                    Campaign Chat
                     </CardTitle>
                     <p className="text-sm text-muted-foreground mt-2">
-                      Start by chatting with AI to generate personalized marketing campaigns. Ask for "7 day campaign", "30 day campaign", or "festival campaign" to create structured schedules.
+                    Start a conversation to generate campaigns. All conversations are automatically stored.
                     </p>
-                  </div>
-                  <Badge variant="outline" className="bg-accent/10 text-accent border-accent/30">
-                    Step 1 of 3
-                  </Badge>
-                </div>
               </CardHeader>
               <CardContent>
-                <div className="flex flex-col h-[600px] border border-border rounded-lg bg-background">
-                  {/* Chat Messages */}
+                  <div className="flex flex-col h-[500px] border border-border rounded-lg bg-background">
                   <ScrollArea className="flex-1 p-4">
                     <div className="space-y-4">
                       {chatMessages.map((message, idx) => (
@@ -867,11 +1316,10 @@ Provide a detailed campaign plan with:
                     </div>
                   </ScrollArea>
 
-                  {/* Chat Input */}
                   <div className="border-t border-border p-4">
                     <div className="flex gap-2">
                       <Textarea
-                        placeholder="Ask me to generate a campaign... (e.g., 'Create a 7-day campaign for coffee lovers' or 'Generate a festival campaign for the holidays')"
+                          placeholder="Ask me to generate a campaign..."
                         value={chatInput}
                         onChange={(e) => setChatInput(e.target.value)}
                         onKeyDown={(e) => {
@@ -896,82 +1344,81 @@ Provide a detailed campaign plan with:
                         )}
                       </Button>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Press Enter to send, Shift+Enter for new line
-                    </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <input
+                          type="checkbox"
+                          id="auto-email"
+                          checked={autoGenerateEmail}
+                          onChange={(e) => setAutoGenerateEmail(e.target.checked)}
+                          className="rounded"
+                        />
+                        <label htmlFor="auto-email" className="text-xs text-muted-foreground">
+                          Auto-generate email from conversation
+                        </label>
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-
-            {/* Generated Campaigns Display */}
-            {generatedCampaigns.length > 0 && (
-              <Card className="border-success/30 bg-gradient-to-br from-success/5 to-transparent">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Sparkles className="h-5 w-5 text-success" />
-                    Generated Campaigns ({generatedCampaigns.length})
-                  </CardTitle>
-                  <p className="text-sm text-muted-foreground mt-2">
-                    Campaigns generated from chat. You can now send emails or make calls to test effectiveness.
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {generatedCampaigns.map((campaign, idx) => (
-                      <CampaignCard key={idx} campaign={campaign} />
-                    ))}
                   </div>
                 </CardContent>
               </Card>
-            )}
 
-            {/* Step 2: Bulk Email Sending - Only show after campaigns are generated */}
-            {generatedCampaigns.length > 0 && (
+              {/* Section 2: Email Generation */}
             <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
                     <CardTitle className="flex items-center gap-2">
                       <Mail className="h-5 w-5 text-primary" />
-                      Step 2: Send Bulk Emails
+                    Email Generation (Top 50 Customers)
                     </CardTitle>
                     <p className="text-sm text-muted-foreground mt-2">
-                      Send campaign emails to customers in bulk. Load customers from your database or add manually.
+                    Email is automatically generated from conversation. Review and send to top 50 customers when ready.
                     </p>
-                  </div>
-                  <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                    Step 2 of 3
-                  </Badge>
-                </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex gap-2">
                   <Button
-                    onClick={loadCustomersForEmail}
+                    onClick={() => loadCustomersForEmail(true)}
                     variant="outline"
                     className="flex-1"
+                      size="sm"
                   >
                     <User className="h-4 w-4 mr-2" />
-                    Load Customers ({emailRecipients.length})
+                    Refresh Customers ({emailRecipients.length})
                   </Button>
+                    <Button
+                      onClick={() => {
+                        // Reset the ref to allow manual regeneration
+                        emailGeneratedRef.current = false;
+                        generateEmailFromConversation();
+                      }}
+                      variant="outline"
+                      size="sm"
+                      disabled={emailLoading || isGeneratingEmail || chatMessages.length < 2}
+                    >
+                      {emailLoading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-4 w-4" />
+                      )}
+                    </Button>
                 </div>
 
                 {emailRecipients.length > 0 && (
                   <div className="p-3 bg-muted rounded-lg border border-border">
-                    <p className="text-sm font-semibold mb-2">Recipients: {emailRecipients.length} customers</p>
+                      <p className="text-sm font-semibold mb-2">Top 50 Customers: {emailRecipients.length} recipients</p>
                     <ScrollArea className="h-32">
                       <div className="space-y-1">
                         {emailRecipients.slice(0, 10).map((recipient, idx) => (
                           <div key={idx} className="text-xs text-muted-foreground">
-                            {recipient.name || recipient.email}
+                              {idx + 1}. {recipient.name || recipient.email}
                           </div>
                         ))}
                         {emailRecipients.length > 10 && (
-                          <p className="text-xs text-muted-foreground">... and {emailRecipients.length - 10} more</p>
+                            <p className="text-xs text-muted-foreground font-semibold">... and {emailRecipients.length - 10} more customers</p>
                         )}
                       </div>
                     </ScrollArea>
+                      <p className="text-xs text-muted-foreground mt-2">
+                        These are the top 50 customers with highest engagement scores based on campaign responses, conversions, and email activity.
+                      </p>
                   </div>
                 )}
 
@@ -987,10 +1434,10 @@ Provide a detailed campaign plan with:
                   <div>
                     <label className="text-sm font-medium">Email Body</label>
                     <Textarea
-                      placeholder="Enter your email content here. Use {{first_name}} for personalization."
+                        placeholder="Email body will be generated from conversation..."
                       value={emailBody}
                       onChange={(e) => setEmailBody(e.target.value)}
-                      className="min-h-[120px]"
+                        className="min-h-[250px]"
                     />
                     <p className="text-xs text-muted-foreground mt-1">
                       Use placeholders: {"{{first_name}}"}, {"{{last_name}}"}, {"{{favorite_product}}"} for personalization
@@ -1002,21 +1449,22 @@ Provide a detailed campaign plan with:
                   onClick={sendBulkEmails}
                   disabled={emailLoading || emailRecipients.length === 0 || !emailSubject.trim() || !emailBody.trim()}
                   className="w-full bg-primary hover:bg-primary/90"
+                    size="lg"
                 >
                   {emailLoading ? (
                     <>
                       <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Sending...
+                        Sending to Top 50 Customers...
                     </>
                   ) : emailSent ? (
                     <>
                       <MailCheck className="h-4 w-4 mr-2" />
-                      Emails Sent!
+                        Emails Sent to {emailRecipients.length} Customers!
                     </>
                   ) : (
                     <>
                       <Mail className="h-4 w-4 mr-2" />
-                      Send Bulk Emails ({emailRecipients.length})
+                        Send to Top 50 Customers ({emailRecipients.length})
                     </>
                   )}
                 </Button>
@@ -1031,42 +1479,30 @@ Provide a detailed campaign plan with:
                 )}
               </CardContent>
             </Card>
-            )}
 
-            {/* Step 3: Customer Calling Section - Only show after emails are sent */}
-            {emailSent && (
+              {/* Section 3: Customer Calling */}
             <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
                 <CardTitle className="flex items-center gap-2">
                   <PhoneCall className="h-5 w-5 text-primary" />
-                      Step 3: Call Customers to Test Campaign Effectiveness
+                    Customer Calls
                 </CardTitle>
                 <p className="text-sm text-muted-foreground mt-2">
-                      Call customers to test how effective your campaigns are. Load top 5 engaged customers or manually add a phone number.
+                    Make calls using conversation script. All call conversations are stored automatically.
                 </p>
-                  </div>
-                  <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                    Step 3 of 3
-                  </Badge>
-                </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Mode Toggle */}
                 <div className="flex gap-2">
                   <Button
                     variant={callingMode === "auto" ? "default" : "outline"}
-                    size="sm"
                     onClick={() => setCallingMode("auto")}
                     className="flex-1"
                   >
                     <User className="h-4 w-4 mr-2" />
-                    Top 5 Customers
+                      Auto (Top Customers)
                   </Button>
                   <Button
                     variant={callingMode === "manual" ? "default" : "outline"}
-                    size="sm"
                     onClick={() => setCallingMode("manual")}
                     className="flex-1"
                   >
@@ -1077,29 +1513,19 @@ Provide a detailed campaign plan with:
 
                 {callingMode === "auto" ? (
                   <div className="space-y-4">
-                    {/* Load Top 5 Button */}
-                    <div className="flex gap-2">
-                      <Button
-                        onClick={loadCustomersForCalling}
-                        variant="outline"
-                        className="flex-1"
-                      >
-                        <User className="h-4 w-4 mr-2" />
-                        Load Top 5 Customers
-                      </Button>
-                    </div>
+                  <Button
+                    onClick={() => loadCustomersForCalling(true)} // Force refresh
+                    variant="outline"
+                    className="w-full"
+                  >
+                    <User className="h-4 w-4 mr-2" />
+                    Refresh Customers
+                  </Button>
 
-                    {/* Top 5 Customers List */}
                     {top5Customers.length > 0 && (
+                        <ScrollArea className="h-48 border border-border rounded-lg p-3">
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Top 5 Most Engaged Customers</label>
-                        <div className="space-y-2 max-h-64 overflow-y-auto border border-border rounded-lg p-2">
-                          {top5Customers.map((customer, idx) => {
-                            const engagementScore = 
-                              (customer.responded_to_campaigns || 0) * 3 +
-                              (customer.converted_campaigns || 0) * 5 +
-                              (customer.email_open_rate || 0) / 10;
-                            return (
+                            {top5Customers.map((customer, idx) => (
                               <div
                                 key={customer.customer_id}
                                 className={`p-3 rounded-lg border cursor-pointer transition-all ${
@@ -1110,109 +1536,53 @@ Provide a detailed campaign plan with:
                                 onClick={() => setSelectedCustomer(customer.customer_id)}
                               >
                                 <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <Badge variant="outline" className="w-8 h-8 flex items-center justify-center">
-                                      #{idx + 1}
-                                    </Badge>
                                     <div>
-                                      <p className="font-medium">
+                                    <p className="text-sm font-medium">
                                         {customer.first_name && customer.last_name
                                           ? `${customer.first_name} ${customer.last_name}`
                                           : customer.email || customer.customer_id}
                                       </p>
                                       <p className="text-xs text-muted-foreground">
-                                        {customer.email || customer.phone || "No contact info"}
+                                      {customer.phone || "No phone"} • {customer.email || "No email"}
                                       </p>
-                                    </div>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setSelectedCustomer(customer.customer_id);
-                                    }}
-                                    variant="outline"
-                                  >
-                                    Select
-                                  </Button>
-                                </div>
-                                <div className="mt-2 flex gap-2 text-xs text-muted-foreground">
+                                    <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
                                   <span>Responses: {customer.responded_to_campaigns || 0}</span>
                                   <span>•</span>
                                   <span>Conversions: {customer.converted_campaigns || 0}</span>
-                                  <span>•</span>
-                                  <span>Open Rate: {customer.email_open_rate || 0}%</span>
                                 </div>
                               </div>
-                            );
-                          })}
+                                  <Badge variant="outline">#{idx + 1}</Badge>
                         </div>
                       </div>
-                    )}
-
-                    {/* Selected Customer Details */}
-                    {selectedCustomer && top5Customers.length > 0 && (() => {
-                      const customer = top5Customers.find(c => c.customer_id === selectedCustomer);
-                      return customer ? (
-                        <div className="text-xs text-muted-foreground p-3 bg-muted rounded border border-border">
-                          <div className="space-y-1">
-                            <p><strong>Name:</strong> {customer.first_name && customer.last_name 
-                              ? `${customer.first_name} ${customer.last_name}` 
-                              : "N/A"}</p>
-                            <p><strong>Email:</strong> {customer.email || "N/A"}</p>
-                            <p><strong>Phone:</strong> {customer.phone || "N/A"}</p>
-                            <p><strong>Campaign Engagement:</strong></p>
-                            <ul className="list-disc list-inside ml-2 space-y-0.5">
-                              <li>Responded to {customer.responded_to_campaigns || 0} campaigns</li>
-                              <li>Converted {customer.converted_campaigns || 0} campaigns</li>
-                              <li>Email open rate: {customer.email_open_rate || 0}%</li>
-                              <li>Email click rate: {customer.email_click_rate || 0}%</li>
-                            </ul>
+                            ))}
                           </div>
-                        </div>
-                      ) : null;
-                    })()}
+                        </ScrollArea>
+                      )}
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    {/* Manual Phone Number Input */}
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Customer Name (Optional)</label>
+                    <div className="space-y-3">
                       <Input
-                        placeholder="e.g., John Doe"
+                        placeholder="Customer Name (Optional)"
                         value={manualCustomerName}
                         onChange={(e) => setManualCustomerName(e.target.value)}
                       />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Phone Number *</label>
                       <Input
-                        placeholder="e.g., +1-555-123-4567"
+                        placeholder="Phone Number (Required)"
                         value={manualPhoneNumber}
                         onChange={(e) => setManualPhoneNumber(e.target.value)}
                         type="tel"
                       />
-                      <p className="text-xs text-muted-foreground">
-                        Enter the phone number you want to call
-                      </p>
-                    </div>
                   </div>
                 )}
                 
-                {/* Action Buttons */}
-                <div className="pt-2 border-t border-border space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-3">
                     <Button
                       onClick={() => initiateCustomerCall()}
                       disabled={callingLoading || (callingMode === "auto" && !selectedCustomer) || (callingMode === "manual" && !manualPhoneNumber.trim())}
                       variant="outline"
-                      className="w-full"
                     >
                       {callingLoading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Generating...
-                        </>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       ) : (
                         <>
                           <MessageSquare className="h-4 w-4 mr-2" />
@@ -1222,14 +1592,11 @@ Provide a detailed campaign plan with:
                     </Button>
                     <Button
                       onClick={makeActualCall}
-                      disabled={callingLoading || activeCall !== null || (callingMode === "auto" && !selectedCustomer) || (callingMode === "manual" && !manualPhoneNumber.trim())}
-                      className="w-full bg-primary hover:bg-primary/90"
+                      disabled={callingLoading || activeCall !== null || !(callScript || editedCallScript) || (callingMode === "auto" && !selectedCustomer) || (callingMode === "manual" && !manualPhoneNumber.trim())}
+                      className="bg-primary hover:bg-primary/90"
                     >
                       {callingLoading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Calling...
-                        </>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       ) : activeCall ? (
                         <>
                           <Phone className="h-4 w-4 mr-2" />
@@ -1238,19 +1605,163 @@ Provide a detailed campaign plan with:
                       ) : (
                         <>
                           <PhoneCall className="h-4 w-4 mr-2" />
-                          Make Actual Call
+                          Make Call
                         </>
                       )}
                     </Button>
                   </div>
+
+                  {/* Call Script/Transcript Editor - Show after script is generated */}
+                  {(callScript || editedCallScript || isEditingScript) && (
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-semibold">Call Transcript (Agent Script):</p>
+                          <p className="text-xs text-muted-foreground">
+                            This is what the agent will say during the call. Edit it to improve the conversation flow.
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          {!isEditingScript && (callScript || editedCallScript) && (
+                            <Button
+                              onClick={() => setIsEditingScript(true)}
+                              variant="outline"
+                              size="sm"
+                            >
+                              <MessageSquare className="h-4 w-4 mr-2" />
+                              Edit
+                            </Button>
+                          )}
+                          {isEditingScript && (
+                            <>
+                              <Button
+                                onClick={() => {
+                                  setEditedCallScript(callScript); // Reset to original
+                                  setIsEditingScript(false);
+                                }}
+                                variant="outline"
+                                size="sm"
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                onClick={() => {
+                                  setCallScript(editedCallScript); // Save edited version
+                                  setIsEditingScript(false);
+                                  toast({
+                                    title: "Transcript Updated",
+                                    description: "Your edited transcript will be used for the call.",
+                                  });
+                                }}
+                                variant="default"
+                                size="sm"
+                              >
+                                Save
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {isEditingScript ? (
+                        <Textarea
+                          value={editedCallScript}
+                          onChange={(e) => setEditedCallScript(e.target.value)}
+                          placeholder="Edit the call transcript/script that the agent will use..."
+                          className="min-h-[200px] font-mono text-sm"
+                        />
+                      ) : (
+                        <ScrollArea className="h-40 border border-border rounded-lg p-3 bg-muted/30">
+                          <p className="text-sm text-foreground whitespace-pre-wrap">
+                            {editedCallScript || callScript}
+                          </p>
+                        </ScrollArea>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Manual Transcript Entry - Show if no script generated yet */}
+                  {!callScript && !editedCallScript && !isEditingScript && (
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold">Or Enter Transcript Manually:</p>
+                        <Button
+                          onClick={() => {
+                            setIsEditingScript(true);
+                            setEditedCallScript("");
+                          }}
+                          variant="outline"
+                          size="sm"
+                        >
+                          <MessageSquare className="h-4 w-4 mr-2" />
+                          Add Transcript
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        You can manually enter a transcript/script for the agent to use during the call.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Show manual entry textarea when editing without script */}
+                  {isEditingScript && !callScript && !editedCallScript && (
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold">Enter Call Transcript:</p>
+                        <div className="flex gap-2">
+                          <Button
+                            onClick={() => {
+                              setIsEditingScript(false);
+                              setEditedCallScript("");
+                            }}
+                            variant="outline"
+                            size="sm"
+                          >
+                            Cancel
+                          </Button>
+                          <Button
+                            onClick={() => {
+                              if (editedCallScript.trim()) {
+                                setCallScript(editedCallScript);
+                                setIsEditingScript(false);
+                                toast({
+                                  title: "Transcript Saved",
+                                  description: "Your transcript will be used for the call.",
+                                });
+                              } else {
+                                toast({
+                                  title: "Transcript Required",
+                                  description: "Please enter a transcript before saving.",
+                                  variant: "destructive",
+                                });
+                              }
+                            }}
+                            variant="default"
+                            size="sm"
+                          >
+                            Save
+                          </Button>
+                        </div>
+                      </div>
+                      <Textarea
+                        value={editedCallScript}
+                        onChange={(e) => setEditedCallScript(e.target.value)}
+                        placeholder="Enter the call transcript/script that the agent will use during the call..."
+                        className="min-h-[200px] font-mono text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        This is what the agent will say during the call. Enter the complete conversation script.
+                      </p>
+                    </div>
+                  )}
                   
                   {activeCall && (
-                    <div className="p-3 bg-primary/10 rounded-lg border border-primary/30">
+                    <div className="p-4 bg-primary/10 rounded-lg border border-primary/30">
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-sm font-semibold text-primary">Call in Progress</p>
                           <p className="text-xs text-muted-foreground">
-                            Status: <span className="font-medium">{activeCall.status}</span>
+                            Status: {activeCall.status}
                           </p>
                           <p className="text-xs text-muted-foreground">
                             To: {activeCall.phoneNumber}
@@ -1262,77 +1773,70 @@ Provide a detailed campaign plan with:
                       </div>
                     </div>
                   )}
-                </div>
 
-                {callScript && (
-                  <div className="space-y-3 pt-4 border-t border-border">
-                    <div className="flex items-start gap-2">
-                      <PhoneCall className="h-4 w-4 text-primary mt-1 flex-shrink-0" />
-                      <div className="flex-1">
-                        <p className="text-sm font-semibold text-foreground mb-1">Call Script:</p>
-                        <p className="text-sm text-muted-foreground whitespace-pre-wrap bg-muted p-3 rounded">
-                          {callScript}
-                        </p>
-                      </div>
-                    </div>
-
-                    {callAudio && (
-                      <div className="flex gap-2 pt-2">
-                        <Button
-                          onClick={playCallAudio}
-                          variant="outline"
-                          size="sm"
-                        >
-                          <Play className="h-4 w-4 mr-2" />
-                          Play Call Audio
-                        </Button>
-                        <Button
-                          onClick={() => downloadAudio(callAudio, "customer_call.mp3")}
-                          variant="outline"
-                          size="sm"
-                        >
-                          <Download className="h-4 w-4 mr-2" />
-                          Download
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* Campaign Feedback - Show after call */}
-                    {activeCall && (activeCall.status === "completed" || activeCall.status === "in-progress") && !callFeedback && (
-                      <div className="pt-4 border-t border-border">
-                        <p className="text-sm font-semibold mb-2">After the call: Did the campaign work for this customer?</p>
-                        <div className="flex gap-2">
-                          <Button
-                            onClick={() => recordCallFeedback("positive")}
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 text-success border-success hover:bg-success/10"
-                          >
-                            <CheckCircle className="h-4 w-4 mr-2" />
-                            Campaign Working
-                          </Button>
-                          <Button
-                            onClick={() => recordCallFeedback("negative")}
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 text-destructive border-destructive hover:bg-destructive/10"
-                          >
-                            <XCircle className="h-4 w-4 mr-2" />
-                            Needs Improvement
-                          </Button>
+                  {/* Real-time Customer Responses - Show during/after call */}
+                  {customerResponses.length > 0 && (
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <p className="text-sm font-semibold">Customer Responses (Real-time):</p>
+                      <ScrollArea className="h-32 border border-border rounded-lg p-3 bg-accent/5">
+                        <div className="space-y-2">
+                          {customerResponses.map((response, idx) => (
+                            <div key={idx} className="text-sm p-2 bg-accent/10 rounded border border-accent/20">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-semibold text-accent">Customer Response:</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {response.timestamp.toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <p className="text-sm text-foreground">{response.content}</p>
+                            </div>
+                          ))}
                         </div>
-                      </div>
-                    )}
-                    
-                    {/* Show feedback option even if call script is generated */}
-                    {callScript && !activeCall && !callFeedback && (
-                      <div className="pt-4 border-t border-border">
-                        <p className="text-sm font-semibold mb-2">After making the call: Did the campaign work?</p>
-                        <p className="text-xs text-muted-foreground mb-2">
-                          Make the call first, then record feedback based on the customer's response.
-                        </p>
-                      </div>
-                    )}
+                      </ScrollArea>
+                      <p className="text-xs text-muted-foreground">
+                        These are real-time responses captured from the customer during the actual phone call (not AI-generated).
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Full Call Conversation - Show after call completes */}
+                  {callConversation && callConversation.conversation_history.length > 0 && (
+                    <div className="space-y-2 pt-4 border-t border-border">
+                      <p className="text-sm font-semibold">Full Call Conversation ({callConversation.total_exchanges} exchanges):</p>
+                      <ScrollArea className="h-48 border border-border rounded-lg p-3">
+                        <div className="space-y-2">
+                          {callConversation.conversation_history.map((log, idx) => (
+                            <div
+                              key={idx}
+                              className={`text-sm p-2 rounded ${
+                                log.role === "agent" 
+                                  ? "bg-primary/10 text-primary-foreground ml-4" 
+                                  : log.role === "customer"
+                                  ? "bg-accent/10 text-accent-foreground mr-4"
+                                  : "bg-muted"
+                              }`}
+                            >
+                              <span className="font-semibold capitalize">{log.role}:</span> {log.content}
+                            </div>
+                          ))}
+                        </div>
+                      </ScrollArea>
+                      
+                      {callConversation.customer_responses.length > 0 && (
+                        <div className="p-3 bg-success/5 rounded-lg border border-success/20">
+                          <p className="text-xs font-semibold text-success mb-2">Customer Feedback Summary:</p>
+                          <ul className="text-xs text-muted-foreground space-y-1">
+                            {callConversation.customer_responses.map((response, idx) => (
+                              <li key={idx} className="flex items-start gap-2">
+                                <span className="text-success">•</span>
+                                <span>{response}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                     {callFeedback && (
                       <div className={`p-3 rounded border ${
@@ -1354,73 +1858,120 @@ Provide a detailed campaign plan with:
                           )}
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">
-                          Feedback recorded. Use this to refine your campaign strategy.
+                        Feedback recorded and stored in memory.
                         </p>
                       </div>
                     )}
 
-                    {/* Conversation Log - Show full conversation from call */}
-                    {callConversation && callConversation.conversation_history.length > 0 && (
-                      <div className="pt-4 border-t border-border">
-                        <div className="flex items-center justify-between mb-2">
-                          <p className="text-sm font-semibold">Call Conversation ({callConversation.total_exchanges} exchanges):</p>
-                          <Badge variant="outline" className="bg-success/10 text-success border-success/30">
-                            Campaign Feedback Captured
-                          </Badge>
-                            </div>
-                        <div className="space-y-2 max-h-60 overflow-y-auto bg-muted/30 p-3 rounded-lg">
-                          {callConversation.conversation_history.map((log, idx) => (
-                        <div
-                          key={idx}
-                              className={`text-xs p-2 rounded ${
-                                log.role === "agent" 
-                                  ? "bg-primary/10 text-primary-foreground ml-4" 
-                                  : log.role === "customer"
-                                  ? "bg-accent/10 text-accent-foreground mr-4"
-                                  : "bg-muted"
-                              }`}
+                  {callConversation && !callFeedback && (
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={() => recordCallFeedback("positive")}
+                        variant="outline"
+                        className="flex-1 text-success border-success hover:bg-success/10"
+                      >
+                        <CheckCircle className="h-4 w-4 mr-2" />
+                        Campaign Working
+                      </Button>
+                      <Button
+                        onClick={() => recordCallFeedback("negative")}
+                        variant="outline"
+                        className="flex-1 text-destructive border-destructive hover:bg-destructive/10"
                             >
-                              <span className="font-semibold capitalize">{log.role}:</span> {log.content}
+                        <XCircle className="h-4 w-4 mr-2" />
+                        Needs Improvement
+                      </Button>
                           </div>
-                          ))}
-                        </div>
+                  )}
+                </CardContent>
+              </Card>
                         
-                        {/* Campaign Effectiveness Summary */}
-                        {callConversation.customer_responses.length > 0 && (
-                          <div className="mt-3 p-3 bg-success/5 rounded-lg border border-success/20">
-                            <p className="text-xs font-semibold text-success mb-1">Customer Feedback Summary:</p>
-                            <ul className="text-xs text-muted-foreground space-y-1">
-                              {callConversation.customer_responses.map((response, idx) => (
-                                <li key={idx} className="flex items-start gap-2">
-                                  <span className="text-success">•</span>
-                                  <span>{response}</span>
-                                </li>
+              {/* Generated Campaigns Display */}
+              {generatedCampaigns.length > 0 && (
+                <Card className="border-success/30 bg-gradient-to-br from-success/5 to-transparent">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="h-5 w-5 text-success" />
+                      Generated Campaigns ({generatedCampaigns.length})
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      {generatedCampaigns.map((campaign, idx) => (
+                        <CampaignCard key={idx} campaign={campaign} />
                               ))}
-                            </ul>
                         </div>
-                      )}
-                    </div>
-                    )}
-                    
-                    {/* Fallback conversation log if no call conversation yet */}
-                    {!callConversation && conversationLog.length > 0 && (
-                      <div className="pt-4 border-t border-border">
-                        <p className="text-sm font-semibold mb-2">Call Activity:</p>
-                        <div className="space-y-2 max-h-40 overflow-y-auto">
-                          {conversationLog.map((log, idx) => (
-                            <div key={idx} className="text-xs p-2 bg-muted rounded">
-                              <span className="font-semibold">{log.role}:</span> {log.content}
-                    </div>
-                          ))}
-                  </div>
-                </div>
-                    )}
-                  </div>
-                )}
                   </CardContent>
                 </Card>
-            )}
+                      )}
+                    </div>
 
+              {/* Right Side: Flow Indicator - Vertical */}
+              <div className="w-80 flex-shrink-0">
+                <Card className="sticky top-6 border-border bg-gradient-to-br from-muted/50 to-background">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Workflow Steps</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex flex-col items-center gap-4">
+                      {/* Step 1: Chat */}
+                      <div className="flex flex-col items-center gap-2 w-full">
+                        <div className="flex items-center gap-3 w-full p-3 bg-accent/10 rounded-lg border border-accent/20">
+                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center">
+                            <MessageSquare className="h-5 w-5 text-accent" />
+                    </div>
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-foreground">Step 1</p>
+                            <p className="text-xs text-muted-foreground">Chat & Generate Campaigns</p>
+                  </div>
+                </div>
+                  </div>
+
+                      {/* Arrow Down */}
+                      <ArrowDown className="h-6 w-6 text-muted-foreground" />
+
+                      {/* Step 2: Email */}
+                      <div className="flex flex-col items-center gap-2 w-full">
+                        <div className="flex items-center gap-3 w-full p-3 bg-primary/10 rounded-lg border border-primary/20">
+                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                            <Mail className="h-5 w-5 text-primary" />
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-foreground">Step 2</p>
+                            <p className="text-xs text-muted-foreground">Generate & Send Emails</p>
+                            <p className="text-xs text-muted-foreground font-medium mt-1">(Top 50 Customers)</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Arrow Down */}
+                      <ArrowDown className="h-6 w-6 text-muted-foreground" />
+
+                      {/* Step 3: Calls */}
+                      <div className="flex flex-col items-center gap-2 w-full">
+                        <div className="flex items-center gap-3 w-full p-3 bg-primary/10 rounded-lg border border-primary/20">
+                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                            <PhoneCall className="h-5 w-5 text-primary" />
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-foreground">Step 3</p>
+                            <p className="text-xs text-muted-foreground">Make Calls & Store</p>
+                            <p className="text-xs text-muted-foreground">Conversations</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Additional Info */}
+                    <div className="mt-6 p-3 bg-muted/50 rounded-lg border border-border">
+                      <p className="text-xs text-muted-foreground text-center">
+                        All conversations are automatically stored in memory for future reference.
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
           </div>
         </main>
       </div>

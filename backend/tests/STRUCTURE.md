@@ -164,10 +164,10 @@ cd backend
 ```bash
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DATABASE=ell_db
+MONGODB_DATABASE=aura_memory_db
 
 # MemMachine
-MEMMACHINE_MCP_URL=http://localhost:8080
+MEMMACHINE_MCP_URL=http://localhost:8081
 MEMMACHINE_USER_ID=default-user
 
 # LLM (optional)

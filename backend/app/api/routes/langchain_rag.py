@@ -27,7 +27,6 @@ if ELEVENLABS_AVAILABLE:
 
 router = APIRouter(prefix="/langchain-rag", tags=["LangChain RAG"])
 
-
 @router.post("/documents", summary="Store documents using LangChain")
 async def store_documents(
     request: StoreDocumentsRequest,
@@ -68,14 +67,13 @@ async def store_documents(
         import traceback
         error_trace = traceback.format_exc()
         error_detail = f"Failed to store documents: {error_msg}"
-        print(f"Error details:\n{error_trace}")
+
         # Return more detailed error in response as a string (FastAPI will serialize it)
         error_message = f"{error_detail}\nType: {error_type}\nDetails: {error_msg}"
         raise HTTPException(
             status_code=500,
             detail=error_message
         )
-
 
 @router.post("/documents/search", summary="Search documents using LangChain")
 async def search_documents(
@@ -93,21 +91,25 @@ async def search_documents(
             k=request.k,
             filter=request.filter,
         )
+        # Metadata should be normalized, but ensure it's done here as well
+        from app.utils.data_normalization import normalize_metadata
+        
+        normalized_results = []
+        for doc in documents:
+            normalized_meta = normalize_metadata(doc.metadata)
+            normalized_results.append({
+                "content": doc.page_content,
+                "metadata": normalized_meta,
+            })
+        
         return {
             "success": True,
             "query": request.query,
-            "results": [
-                {
-                    "content": doc.page_content,
-                    "metadata": doc.metadata,
-                }
-                for doc in documents
-            ],
-            "total": len(documents),
+            "results": normalized_results,
+            "total": len(normalized_results),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to search documents: {str(e)}")
-
 
 @router.get("/documents", summary="List stored documents")
 async def list_documents(
@@ -120,7 +122,6 @@ async def list_documents(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
-
 
 @router.delete("/documents", summary="Delete documents")
 async def delete_documents(
@@ -138,7 +139,6 @@ async def delete_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete documents: {str(e)}")
 
-
 @router.post("/retrieve", summary="Retrieve context for RAG")
 async def retrieve_context(
     request: LangChainRAGQueryRequest,
@@ -151,7 +151,7 @@ async def retrieve_context(
     with memory retrieval from MemMachine.
     
     **Note:** MemMachine is required. Ensure the MCP server is running.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         result = await rag_service.retrieve_context(
@@ -160,13 +160,14 @@ async def retrieve_context(
             include_memories=request.include_memories,
             user_id=request.user_id,
         )
+        # Metadata is already normalized in the service
         return {
             "success": True,
             "query": request.query,
             "documents": [
                 {
                     "content": doc.page_content,
-                    "metadata": doc.metadata,
+                    "metadata": doc.metadata,  # Already normalized
                 }
                 for doc in result["documents"]
             ],
@@ -185,12 +186,11 @@ async def retrieve_context(
             raise HTTPException(
                 status_code=503,
                 detail=f"MemMachine is required but unavailable: {error_msg}. "
-                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+                       f"Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions."
             )
         raise HTTPException(status_code=400, detail=f"Failed to retrieve context: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve context: {str(e)}")
-
 
 @router.post("/query", summary="RAG query using LangChain")
 async def rag_query(
@@ -206,7 +206,7 @@ async def rag_query(
     3. Generates an answer using an LLM
     
     **Note:** MemMachine is required. Ensure the MCP server is running.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         result = await rag_service.rag_query(
@@ -222,12 +222,11 @@ async def rag_query(
             raise HTTPException(
                 status_code=503,
                 detail=f"MemMachine is required but unavailable: {error_msg}. "
-                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+                       f"Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions."
             )
         raise HTTPException(status_code=400, detail=f"Failed to process RAG query: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process RAG query: {str(e)}")
-
 
 @router.post("/query/campaign", summary="Campaign conversation query optimized for voice (ElevenLabs)")
 async def campaign_conversation_query(
@@ -250,7 +249,7 @@ async def campaign_conversation_query(
     Use this endpoint when building voice conversations about campaigns.
     
     **Note:** MemMachine is required. Ensure the MCP server is running.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         # Allow higher k for finding active customers
@@ -258,22 +257,21 @@ async def campaign_conversation_query(
         result = await rag_service.campaign_conversation_query(
             query=request.query,
             k=k,
-            include_memories=request.include_memories,
+            include_memories=True,  # MemMachine is required - always include memories
             user_id=request.user_id,
         )
         return result
     except ValueError as e:
         error_msg = str(e)
-        if "not available" in error_msg.lower() or "not found" in error_msg.lower() or "Failed to connect" in error_msg:
+        if "not available" in error_msg.lower() or "not found" in error_msg.lower() or "Failed to connect" in error_msg or "unavailable" in error_msg.lower():
             raise HTTPException(
                 status_code=503,
                 detail=f"MemMachine is required but unavailable: {error_msg}. "
-                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+                       f"Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions."
             )
         raise HTTPException(status_code=400, detail=f"Failed to process campaign conversation query: {error_msg}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process campaign conversation query: {str(e)}")
-
 
 @router.post("/query/campaign/voice", summary="Campaign conversation with ElevenLabs voice output")
 async def campaign_conversation_voice(
@@ -330,10 +328,23 @@ async def campaign_conversation_voice(
             }
         )
     except ValueError as e:
+        error_msg = str(e)
+        # Check if it's a quota error
+        if "quota" in error_msg.lower() or "credits" in error_msg.lower():
+            raise HTTPException(
+                status_code=402,  # Payment Required
+                detail=f"ElevenLabs quota exceeded: {error_msg}. The call will still work using Twilio's built-in TTS."
+            )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        error_msg = str(e)
+        # Check if it's a quota error in the exception message
+        if "quota" in error_msg.lower() or "credits" in error_msg.lower():
+            raise HTTPException(
+                status_code=402,  # Payment Required
+                detail=f"ElevenLabs quota exceeded: {error_msg}. The call will still work using Twilio's built-in TTS."
+            )
         raise HTTPException(status_code=500, detail=f"Failed to generate voice response: {str(e)}")
-
 
 @router.post("/query/langgraph", summary="RAG query using LangGraph workflow")
 async def langgraph_rag_query(

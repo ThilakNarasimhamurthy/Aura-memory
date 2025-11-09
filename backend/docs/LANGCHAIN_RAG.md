@@ -73,10 +73,10 @@ export LLM_MODEL="gpt-4o-mini"  # or "claude-3-haiku-20240307"
 
 # MongoDB (if not already set)
 export MONGODB_URI="mongodb://localhost:27017"
-export MONGODB_DATABASE="ell_db"
+export MONGODB_DATABASE="aura_memory_db"
 
 # MemMachine (if not already set)
-export MEMMACHINE_MCP_URL="http://localhost:8080"
+export MEMMACHINE_MCP_URL="http://localhost:8081"
 export MEMMACHINE_USER_ID="default-user"
 ```
 

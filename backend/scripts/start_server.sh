@@ -1,7 +1,10 @@
 #!/bin/bash
 # Script to start the FastAPI backend server
 
-cd "$(dirname "$0")"
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Change to the backend directory (parent of scripts)
+cd "$SCRIPT_DIR/.."
 
 # Kill any existing process on port 8000
 if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -14,9 +17,9 @@ fi
 if [ ! -f .env ]; then
     echo "Creating .env file..."
     cat > .env << EOF
-APP_NAME=ELL Backend
+APP_NAME=Aura Memory Backend
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DATABASE=ell_db
+MONGODB_DATABASE=aura_memory_db
 EOF
     echo "✓ .env file created with default values"
     echo ""
@@ -36,18 +39,30 @@ if [ ! -d .venv ]; then
     echo "Creating virtual environment..."
     python3 -m venv .venv
     echo "✓ Virtual environment created"
-    echo "Installing dependencies..."
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    echo "✓ Dependencies installed"
-else
-    echo "✓ Virtual environment exists"
-    source .venv/bin/activate
 fi
+
+# Activate virtual environment
+    source .venv/bin/activate
 
 # Check if dependencies are installed
 echo "Checking dependencies..."
-python3 test_python.py 2>&1 | grep -E "✓|✗" || echo "Running dependency check..."
+if ! python3 -c "import fastapi" 2>/dev/null; then
+    echo "Installing dependencies..."
+    if [ -f requirements.txt ]; then
+        pip install -r requirements.txt
+        echo "✓ Dependencies installed from requirements.txt"
+    else
+        echo "⚠️  requirements.txt not found, installing core dependencies..."
+        pip install fastapi uvicorn[standard] pymongo pydantic pydantic-settings httpx python-dotenv
+        echo "✓ Core dependencies installed"
+    fi
+else
+    echo "✓ Dependencies already installed"
+fi
+
+# Verify core dependencies
+echo "Verifying dependencies..."
+python3 -c "import fastapi, uvicorn, pymongo" 2>/dev/null && echo "✓ Core dependencies available" || echo "⚠️  Warning: Some dependencies may be missing"
 
 # Verify .env file has MONGODB_URI before starting
 if ! grep -q "^MONGODB_URI=" .env || grep -q "^MONGODB_URI=$" .env; then
@@ -72,5 +87,8 @@ echo ""
 echo "Press CTRL+C to stop the server"
 echo ""
 
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Ensure we're in the backend directory and run uvicorn
+echo "Current directory: $(pwd)"
+echo "Starting uvicorn from: $(pwd)"
+PYTHONPATH="$(pwd):$PYTHONPATH" uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 

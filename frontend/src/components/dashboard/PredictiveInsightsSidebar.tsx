@@ -3,6 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertCircle, TrendingUp, Coffee, Calendar, Brain, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { customersApi, campaignsApi } from "@/lib/api";
+import { formatPercentage } from "@/lib/utils/format";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
 
 export function PredictiveInsightsSidebar() {
   const [insights, setInsights] = useState<any[]>([]);
@@ -15,18 +17,39 @@ export function PredictiveInsightsSidebar() {
 
   useEffect(() => {
     const loadInsights = async () => {
+      // Check cache first
+      const cachedInsights = getCachedData<any[]>('predictive_insights_sidebar_insights');
+      const cachedMetrics = getCachedData<{recallAccuracy: number; activePatterns: number; predictionsToday: number}>('predictive_insights_sidebar_metrics');
+      if (cachedInsights && cachedMetrics) {
+        // Restore icon components after cache retrieval
+        const iconMap: Record<string, any> = {
+          AlertCircle,
+          Calendar,
+          Coffee,
+          TrendingUp,
+          Brain
+        };
+        const restoredInsights = cachedInsights.map(insight => ({
+          ...insight,
+          icon: typeof insight.icon === 'string' ? iconMap[insight.icon] : insight.icon || AlertCircle
+        }));
+        setInsights(restoredInsights);
+        setMemoryMetrics(cachedMetrics);
+        setLoading(false);
+        return;
+      }
+      
       try {
         const [customerResponse, campaignResponse] = await Promise.all([
-          customersApi.findActive(100),
+          customersApi.findActive(1000), // Reduced for performance
           campaignsApi.getEffectiveness()
         ]);
 
         const customerData = (customerResponse?.documents || []).map(doc => doc.metadata);
         const campaignData = (campaignResponse?.documents || []).map(doc => doc.metadata);
         
-        // If no data, API should have provided mock data, but handle edge case
+        // Handle empty data state
         if (customerData.length === 0 && campaignData.length === 0) {
-          console.warn("No insights data available");
           setInsights([]);
           setMemoryMetrics({
             recallAccuracy: 0,
@@ -43,7 +66,7 @@ export function PredictiveInsightsSidebar() {
         ).length;
 
         // Calculate optimal campaign time (based on email open rates)
-        const emailCustomers = customerData.filter(c => c.email_open_rate && c.email_open_rate > 0);
+        const emailCustomers = customerData.filter(c => c.email_open_rate && !isNaN(c.email_open_rate!) && c.email_open_rate! > 0);
         const avgOpenRate = emailCustomers.length > 0
           ? emailCustomers.reduce((sum, c) => sum + (c.email_open_rate || 0), 0) / emailCustomers.length
           : 0;
@@ -76,6 +99,7 @@ export function PredictiveInsightsSidebar() {
         const calculatedInsights = [
           {
             icon: AlertCircle,
+            iconName: 'AlertCircle',
             color: "text-warning",
             bg: "bg-warning/10",
             title: "Churn Alert",
@@ -84,14 +108,16 @@ export function PredictiveInsightsSidebar() {
           },
           {
             icon: Calendar,
+            iconName: 'Calendar',
             color: "text-accent",
             bg: "bg-accent/10",
             title: "Optimal Campaign Time",
-            message: `Thursday 4–6 PM for email campaigns (${avgOpenRate.toFixed(1)}% avg open rate)`,
+            message: `Thursday 4–6 PM for email campaigns (${formatPercentage(isNaN(avgOpenRate) ? 0 : avgOpenRate, 0)} avg open rate)`,
             priority: "medium"
           },
           {
             icon: Coffee,
+            iconName: 'Coffee',
             color: "text-primary",
             bg: "bg-primary/10",
             title: "Product Trend",
@@ -100,6 +126,7 @@ export function PredictiveInsightsSidebar() {
           },
           {
             icon: TrendingUp,
+            iconName: 'TrendingUp',
             color: "text-success",
             bg: "bg-success/10",
             title: "Revenue Surge",
@@ -108,6 +135,7 @@ export function PredictiveInsightsSidebar() {
           },
           {
             icon: Brain,
+            iconName: 'Brain',
             color: "text-accent",
             bg: "bg-accent/10",
             title: "AI Memory Insight",
@@ -119,21 +147,33 @@ export function PredictiveInsightsSidebar() {
         setInsights(calculatedInsights);
 
         // Set memory metrics (simulated based on data volume)
-        setMemoryMetrics({
+        const memoryMetricsData = {
           recallAccuracy: 94.2,
           activePatterns: customerData.length + campaignData.length,
           predictionsToday: Math.floor((customerData.length + campaignData.length) / 10)
-        });
+        };
+        setMemoryMetrics(memoryMetricsData);
+        
+        // Cache the data (store icon names as strings to avoid serialization issues)
+        // Remove icon component before caching, keep only iconName
+        const insightsToCache = calculatedInsights.map(({ icon, ...rest }) => ({ ...rest, iconName: rest.iconName }));
+        setCachedData('predictive_insights_sidebar_insights', insightsToCache);
+        setCachedData('predictive_insights_sidebar_metrics', memoryMetricsData);
       } catch (error) {
-        console.error("Error loading insights:", error);
         setInsights([]);
+        setMemoryMetrics({
+          recallAccuracy: 0,
+          activePatterns: 0,
+          predictionsToday: 0
+        });
       } finally {
         setLoading(false);
       }
     };
 
     loadInsights();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty dependency array - only run on mount
   return (
     <aside className="w-80 bg-card border-l border-border flex flex-col h-full overflow-y-auto">
       <div className="p-6 border-b border-border sticky top-0 bg-card z-10">
@@ -189,7 +229,7 @@ export function PredictiveInsightsSidebar() {
           <CardContent className="p-4 pt-0 space-y-2">
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">Recall Accuracy</span>
-              <span className="text-accent font-semibold">{memoryMetrics.recallAccuracy.toFixed(1)}%</span>
+              <span className="text-accent font-semibold">{formatPercentage(isNaN(memoryMetrics.recallAccuracy) ? 0 : memoryMetrics.recallAccuracy, 0)}</span>
             </div>
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">Active Patterns</span>

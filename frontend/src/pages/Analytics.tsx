@@ -7,6 +7,7 @@ import { TrendingUp, DollarSign, Users, Target, Loader2, RefreshCw } from "lucid
 import { Button } from "@/components/ui/button";
 import { campaignsApi, customersApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
 
 export default function Analytics() {
   const [timeSeriesData, setTimeSeriesData] = useState<any[]>([]);
@@ -19,14 +20,45 @@ export default function Analytics() {
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
 
-  const loadAnalyticsData = async () => {
+  const loadAnalyticsData = async (forceRefresh: boolean = false) => {
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cachedSummary = getCachedData<typeof summary>('analytics_summary');
+      const cachedTimeSeries = getCachedData<any[]>('analytics_timeseries');
+      
+      if (cachedSummary && cachedTimeSeries) {
+        setSummary(cachedSummary);
+        setTimeSeriesData(cachedTimeSeries);
+        setLoading(false);
+        return;
+      }
+    }
+    
     setLoading(true);
     try {
-      // Fetch campaign effectiveness data
-      const campaignResponse = await campaignsApi.getEffectiveness();
+      // Try to fetch from analytics API first (structured data)
+      let campaignResponse, customerResponse;
       
-      // Fetch customer data
-      const customerResponse = await customersApi.findActive(100);
+      try {
+        const analyticsSummary = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/analytics/summary`);
+        if (analyticsSummary.ok) {
+          const summaryData = await analyticsSummary.json();
+          if (summaryData.success) {
+            // Use structured data
+            campaignResponse = await campaignsApi.getEffectiveness();
+            customerResponse = await customersApi.findActive(1000); // Reduced for performance
+          }
+        }
+      } catch (error) {
+      }
+      
+      // Fallback to RAG queries if structured API fails
+      if (!campaignResponse) {
+        campaignResponse = await campaignsApi.getEffectiveness();
+      }
+      if (!customerResponse) {
+        customerResponse = await customersApi.findActive(100);
+      }
 
       // Calculate summary from real data
       let totalRevenue = 0;
@@ -38,9 +70,8 @@ export default function Analytics() {
       const campaignDocs = campaignResponse?.documents || [];
       const customerDocs = customerResponse?.documents || [];
       
-      // If no data, API should have provided mock data, but handle edge case
+      // Handle empty data state
       if (campaignDocs.length === 0 && customerDocs.length === 0) {
-        console.warn("No analytics data available");
         setSummary({
           totalRevenue: 0,
           avgROI: 0,
@@ -73,12 +104,14 @@ export default function Analytics() {
       const avgConversion = conversionCount > 0 ? totalConversion / conversionCount : 0;
       const totalCustomers = customerResponse?.customers_found || customerDocs.length;
 
-      setSummary({
+      const newSummary = {
         totalRevenue,
         avgROI,
         totalCustomers,
         avgConversion
-      });
+      };
+
+      setSummary(newSummary);
 
       // Generate time series data from actual customer data
       // Group customers by their purchase patterns to create realistic trends
@@ -115,12 +148,17 @@ export default function Analytics() {
       
       setTimeSeriesData(timeSeries);
 
-      toast({
-        title: "Analytics Data Loaded",
-        description: `Loaded data from ${totalCustomers} customers and ${campaignDocs.length} campaign records.`,
-      });
+      // Cache the data
+      setCachedData('analytics_summary', newSummary);
+      setCachedData('analytics_timeseries', timeSeries);
+
+      if (forceRefresh) {
+        toast({
+          title: "Analytics Data Refreshed",
+          description: `Loaded data from ${totalCustomers} customers and ${campaignDocs.length} campaign records.`,
+        });
+      }
     } catch (error: any) {
-      console.error("Error loading analytics data:", error);
       toast({
         title: "Error Loading Analytics",
         description: error.message || "Failed to load analytics data. Please try again.",
@@ -132,8 +170,8 @@ export default function Analytics() {
   };
 
   useEffect(() => {
-    loadAnalyticsData();
-  }, []);
+    loadAnalyticsData(false); // Don't force refresh on mount - use cache if available
+  }, []); // Empty dependency array - only run on mount
 
   return (
     <div className="flex h-screen w-full bg-background overflow-hidden">
@@ -150,7 +188,7 @@ export default function Analytics() {
                 <p className="text-muted-foreground">Comprehensive business intelligence and trends</p>
               </div>
               <Button
-                onClick={loadAnalyticsData}
+                onClick={() => loadAnalyticsData(true)} // Force refresh
                 disabled={loading}
                 variant="outline"
                 size="sm"
@@ -175,7 +213,7 @@ export default function Analytics() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm text-muted-foreground">Total Revenue</p>
-                      <p className="text-2xl font-bold text-success">${summary.totalRevenue.toFixed(0)}</p>
+                      <p className="text-2xl font-bold text-success">${Math.round(summary.totalRevenue || 0)}</p>
                     </div>
                     <DollarSign className="h-8 w-8 text-success" />
                   </div>
@@ -187,7 +225,7 @@ export default function Analytics() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm text-muted-foreground">Average ROI</p>
-                      <p className="text-2xl font-bold text-accent">{summary.avgROI.toFixed(0)}%</p>
+                      <p className="text-2xl font-bold text-accent">{Math.round(summary.avgROI || 0)}%</p>
                     </div>
                     <TrendingUp className="h-8 w-8 text-accent" />
                   </div>
@@ -211,7 +249,7 @@ export default function Analytics() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm text-muted-foreground">Avg Conversion</p>
-                      <p className="text-2xl font-bold text-warning">{(summary.avgConversion * 100).toFixed(1)}%</p>
+                      <p className="text-2xl font-bold text-warning">{Math.round((summary.avgConversion || 0) * 100)}%</p>
                     </div>
                     <Target className="h-8 w-8 text-warning" />
                   </div>

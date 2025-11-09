@@ -5,7 +5,7 @@ services:
     container_name: memmachine-postgres
     restart: unless-stopped
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"  # Changed from 5432 to 5433 to avoid conflict
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-memmachine}
       POSTGRES_USER: ${POSTGRES_USER:-memmachine}
@@ -28,9 +28,9 @@ services:
     container_name: memmachine-neo4j
     restart: unless-stopped
     ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"  # HTTP
-      - "${NEO4J_HTTPS_PORT:-7473}:7473"  # HTTPS
-      - "${NEO4J_PORT:-7687}:7687"  # Bolt
+      - "${NEO4J_HTTP_PORT:-7475}:7474"  # HTTP - Changed from 7474 to 7475
+      - "${NEO4J_HTTPS_PORT:-7476}:7473"  # HTTPS - Changed from 7473 to 7476
+      - "${NEO4J_PORT:-7688}:7687"  # Bolt - Changed from 7687 to 7688
     environment:
       NEO4J_EDITION: community
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4j_password}
@@ -62,25 +62,28 @@ services:
     container_name: memmachine-app
     restart: unless-stopped
     ports:
-      - "${MEMORY_SERVER_PORT:-8080}:8080"
+      - "${MEMORY_SERVER_PORT:-8090}:8080"  # Host:Container - Changed from 8081 to 8090 to avoid conflict
     environment:
       # Database configuration
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      # IMPORTANT: Inside Docker, always use service names and internal container ports
+      # Host ports (5433, 7688) are only for external access from host machine
+      POSTGRES_HOST: postgres  # Service name (not localhost or IP)
+      POSTGRES_PORT: 5432  # Internal container port (NOT host port 5433)
       POSTGRES_USER: ${POSTGRES_USER:-memmachine}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memmachine_password}
       POSTGRES_DB: ${POSTGRES_DB:-memmachine}
 
       # Neo4j configuration
-      NEO4J_HOST: ${NEO4J_HOST:-neo4j}
-      NEO4J_PORT: ${NEO4J_PORT:-7687}
+      # IMPORTANT: Inside Docker, use service name and internal port
+      NEO4J_HOST: neo4j  # Service name (not localhost or IP)
+      NEO4J_PORT: 7687  # Internal container port (NOT host port 7688)
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4j_password}
 
       # Application configuration
       MEMORY_CONFIG: ${MEMORY_CONFIG:-/app/configuration.yml}
       MCP_BASE_URL: ${MCP_BASE_URL:-http://memmachine:8080}
-      GATEWAY_URL: ${GATEWAY_URL:-http://localhost:8080}
+      GATEWAY_URL: ${GATEWAY_URL:-http://localhost:8090}  # Changed from 8081 to 8090
       FAST_MCP_LOG_LEVEL: ${FAST_MCP_LOG_LEVEL:-INFO}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

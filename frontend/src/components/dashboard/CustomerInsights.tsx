@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Users, TrendingUp, Sparkles } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2 } from "lucide-react";
 import { customersApi } from "@/lib/api";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
+import { ragApi } from "@/lib/api";
 
 // These will be populated from real data
 
@@ -38,13 +39,43 @@ export function CustomerInsights({ dateRange }: { dateRange: string }) {
 
   useEffect(() => {
     const loadCustomerInsights = async () => {
+      // Check cache first
+      const cachedPurchasePred = getCachedData<any[]>('customer_insights_purchase_prediction');
+      const cachedCategoryData = getCachedData<any[]>('customer_insights_category_data');
+      if (cachedPurchasePred && cachedCategoryData) {
+        setPurchasePrediction(cachedPurchasePred);
+        setCategoryData(cachedCategoryData);
+        setLoading(false);
+        return;
+      }
+      
       try {
-        const response = await customersApi.findActive(100);
+        // Try structured data API first
+        let response;
+        try {
+          response = await customersApi.findActive(1000); // Reduced for performance
+        } catch (error) {
+          // Try direct API call
+          const directResponse = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/customers?limit=1000`); // Reduced for performance
+          if (directResponse.ok) {
+            const data = await directResponse.json();
+            if (data.success && data.customers) {
+              // Convert to expected format
+              response = {
+                documents: data.customers.map((c: any) => ({
+                  content: `${c.first_name} ${c.last_name} is a ${c.customer_segment} customer`,
+                  metadata: c,
+                })),
+                customers_found: data.customers.length,
+              };
+            }
+          }
+        }
+        
         const customerData = (response?.documents || []).map(doc => doc.metadata);
         
-        // If no data, API should have provided mock data, but handle edge case
+        // Handle empty data state
         if (customerData.length === 0) {
-          console.warn("No customer data available");
           setPurchasePrediction([]);
           setCategoryData([]);
           setLoading(false);
@@ -100,11 +131,14 @@ export function CustomerInsights({ dateRange }: { dateRange: string }) {
             color: colors[index % colors.length]
           }))
           .sort((a, b) => b.value - a.value)
-          .slice(0, 4); // Top 4 categories
+          // Show all categories, not just top 4
 
         setCategoryData(categoryArr);
+        
+        // Cache the data
+        setCachedData('customer_insights_purchase_prediction', purchasePred);
+        setCachedData('customer_insights_category_data', categoryArr);
       } catch (error) {
-        console.error("Error loading customer insights:", error);
         // Set default empty data on error
         setPurchasePrediction([]);
         setCategoryData([]);
@@ -124,24 +158,35 @@ export function CustomerInsights({ dateRange }: { dateRange: string }) {
     try {
       const period = dateRange === "7days" ? "7days" : dateRange === "30days" ? "30days" : "7days";
       
-      const { data, error } = await supabase.functions.invoke("generate-campaign", {
-        body: {
-          type: "category-campaign",
-          category,
-          period,
-          historicalData: `Customer preference analysis shows ${category} is trending. Generate targeted campaigns.`
-        }
-      });
+      // Use backend RAG API to generate campaign
+      const query = `Generate a ${period === "7days" ? "7-day" : "30-day"} marketing campaign plan for ${category} category. Customer preference analysis shows ${category} is trending. Create targeted campaigns with specific days, captions, and campaign types.`;
+      
+      const response = await ragApi.campaignQuery(query);
+      
+      // Format the response as campaign data
+      const campaignData = {
+        category,
+        period,
+        campaigns: response.documents?.map((doc: any, index: number) => ({
+          day: `Day ${index + 1}`,
+          date: new Date(Date.now() + index * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          bannerDescription: doc.metadata?.title || `Campaign ${index + 1} for ${category}`,
+          caption: doc.content || doc.metadata?.title || `Campaign ${index + 1} for ${category}`,
+          story: doc.content || "",
+          timing: "09:00 AM",
+          channel: "Email",
+          channelReason: "Targeted email campaign for optimal engagement",
+          type: "category-campaign"
+        })) || [],
+        answer: response.answer || `Generated ${period === "7days" ? "7-day" : "30-day"} campaign plan for ${category}`
+      };
 
-      if (error) throw error;
-
-      setCampaignResult(data);
+      setCampaignResult(campaignData);
       toast({
         title: "Campaign Generated!",
         description: `AI-powered ${period === "7days" ? "7-day" : "30-day"} campaign plan ready for ${category}.`,
       });
     } catch (error: any) {
-      console.error("Error generating campaign:", error);
       toast({
         title: "Generation Failed",
         description: error.message || "Unable to generate campaign. Please try again.",

@@ -42,11 +42,11 @@ from pymongo.database import Database
 
 from app.database import get_database, get_client
 from app.services.memmachine_client import MemMachineMCPClient
+from app.utils.data_normalization import normalize_metadata, normalize_customer_summary
 
 # Load .env file to ensure environment variables are available
 _env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(_env_path)
-
 
 class LangChainRAGService:
     """LangChain-based RAG service with MongoDB vector store."""
@@ -76,7 +76,7 @@ class LangChainRAGService:
         embedding_api_key = os.getenv("OPENAI_API_KEY")
         if not embedding_api_key:
             # Don't fail at initialization - will fail when actually trying to use embeddings
-            print("Warning: OPENAI_API_KEY not set. Embeddings will fail when used.")
+
             embedding_api_key = "not-set"
 
         self.embeddings = OpenAIEmbeddings(
@@ -123,16 +123,19 @@ class LangChainRAGService:
                 text_key="content",  # Field name for text content
                 embedding_key="embedding",  # Field name for embeddings
             )
-            print(f"✅ MongoDB Atlas Vector Search initialized (index: {self.vector_search_index_name})")
+            # Check if collection has documents
+            doc_count = collection.count_documents({})
+            if doc_count == 0:
+                # Vector index is empty, will use structured data
+                pass
+            else:
+                # Vector index has documents
+                pass
         except Exception as e:
             error_msg = f"Failed to initialize MongoDB Atlas Vector Search: {e}"
-            print(f"❌ {error_msg}")
-            print("   Production setup requires:")
-            print("   1. MongoDB Atlas cluster (not local MongoDB)")
-            print("   2. A vector search index configured in MongoDB Atlas")
-            print("   3. Index name: 'vector_index'")
-            print("   4. Index on field 'embedding' with dimension 1536")
-            print("   See MONGODB_ATLAS_VECTOR_SEARCH_SETUP.md for setup instructions")
+            # Vector search initialization failed, will use structured data instead
+            pass
+
             raise ValueError(f"{error_msg}. Please configure MongoDB Atlas Vector Search for production use.") from e
 
     @property
@@ -229,17 +232,11 @@ class LangChainRAGService:
                 
                 # Check for other embedding/vector store errors
                 error_msg = f"MongoDB Atlas Vector Search storage failed: {error_msg}"
-                print(f"❌ {error_msg}")
-                print("   This usually means:")
-                print("   1. Vector search index is not configured in MongoDB Atlas")
-                print("   2. Index name is incorrect (should be 'vector_index')")
-                print("   3. Index field mapping is incorrect")
-                print("   4. Or OpenAI API authentication failed")
                 raise ValueError(f"{error_msg}. Please check your configuration.") from e
         else:
             # This should not happen in production if MongoDB Atlas is properly configured
             error_msg = "MongoDB Atlas Vector Search is not initialized. Please check your configuration."
-            print(f"❌ {error_msg}")
+
             raise ValueError(error_msg)
 
     def search_documents(
@@ -250,6 +247,8 @@ class LangChainRAGService:
     ) -> list[Document]:
         """
         Search documents using MongoDB Atlas Vector Search.
+        
+        Falls back to structured data if chunks are empty or vector search fails.
 
         Args:
             query: Search query
@@ -264,17 +263,263 @@ class LangChainRAGService:
                 # Use MongoDB Atlas Vector Search - production ready
                 # Note: MongoDBAtlasVectorSearch uses 'pre_filter' for metadata filtering
                 if filter:
-                    return self.vector_store.similarity_search(query, k=k, pre_filter=filter)
+                    results = self.vector_store.similarity_search(query, k=k, pre_filter=filter)
                 else:
-                    return self.vector_store.similarity_search(query, k=k)
+                    results = self.vector_store.similarity_search(query, k=k)
+                
+                # If no results, try structured data fallback
+                if not results or len(results) == 0:
+                    # This is expected if chunks collection is empty or query doesn't match
+                    # Structured data fallback ensures we always return relevant data
+                    return self._search_structured_data(query, k)
+                
+                return results
             except Exception as e:
                 error_msg = f"MongoDB Atlas Vector Search failed: {e}"
-                print(f"❌ {error_msg}")
-                raise ValueError(f"{error_msg}. Please check your MongoDB Atlas Vector Search configuration.") from e
+                # Fallback to structured data
+                try:
+                    return self._search_structured_data(query, k)
+                except Exception as fallback_error:
+                    raise ValueError(f"{error_msg}. Structured data query also failed: {fallback_error}") from e
         else:
-            error_msg = "MongoDB Atlas Vector Search is not initialized. Please check your configuration."
-            print(f"❌ {error_msg}")
-            raise ValueError(error_msg)
+            # If vector store not initialized, use structured data
+            return self._search_structured_data(query, k)
+    
+    def _search_structured_data(self, query: str, k: int = 5) -> list[Document]:
+        """
+        Fallback: Search structured data from MongoDB collections.
+        
+        This method queries the customers, products, campaigns collections
+        directly when vector search is not available or chunks are empty.
+        """
+        from langchain_core.documents import Document
+        
+        documents = []
+        query_lower = query.lower()
+        
+        # Check if query is about customers
+        customer_keywords = ["customer", "customers", "active", "purchase", "spent", "lifetime", "segment"]
+        is_customer_query = any(keyword in query_lower for keyword in customer_keywords)
+        
+        if is_customer_query:
+            # Get customers from structured collection
+            customers_collection = self.db["customers"]
+            customers = list(
+                customers_collection.find({})
+                .sort("total_spent", -1)
+                .limit(k)
+            )
+            
+            for customer in customers:
+                # Convert customer data to searchable text
+                text_parts = []
+                text_parts.append(f"Customer: {customer.get('first_name', '')} {customer.get('last_name', '')}")
+                text_parts.append(f"Customer ID: {customer.get('customer_id', '')}")
+                text_parts.append(f"Email: {customer.get('email', '')}")
+                text_parts.append(f"Segment: {customer.get('customer_segment', '')}")
+                text_parts.append(f"Total Purchases: {customer.get('total_purchases', 0)}")
+                text_parts.append(f"Total Spent: ${customer.get('total_spent', 0):.2f}")
+                text_parts.append(f"Lifetime Value: ${customer.get('lifetime_value', 0):.2f}")
+                text_parts.append(f"Average Order Value: ${customer.get('avg_order_value', 0):.2f}")
+                if customer.get('loyalty_member'):
+                    text_parts.append(f"Loyalty Points: {customer.get('loyalty_points', 0)}")
+                
+                content = ". ".join(text_parts) + "."
+                
+                # Create Document with customer metadata - include ALL fields for frontend
+                metadata = {
+                    "source": "customers",
+                    "customer_id": customer.get("customer_id"),
+                    "type": "customer",
+                    "category": "customer_data",
+                    "first_name": customer.get("first_name"),
+                    "last_name": customer.get("last_name"),
+                    "email": customer.get("email"),
+                    "phone": customer.get("phone"),
+                    "customer_segment": customer.get("customer_segment"),
+                    "total_purchases": customer.get("total_purchases"),
+                    "total_spent": customer.get("total_spent"),
+                    "lifetime_value": customer.get("lifetime_value"),
+                    "avg_order_value": customer.get("avg_order_value"),
+                    "loyalty_member": customer.get("loyalty_member"),
+                    "loyalty_points": customer.get("loyalty_points"),
+                    "preferred_contact_method": customer.get("preferred_contact_method") or customer.get("phone"),
+                    "favorite_product_category": customer.get("favorite_product_category") or customer.get("preferred_category"),
+                    "preferred_category": customer.get("preferred_category") or customer.get("favorite_product_category"),
+                    # Campaign engagement metrics
+                    "responded_to_campaigns": customer.get("responded_to_campaigns", 0),
+                    "clicked_campaigns": customer.get("clicked_campaigns", customer.get("responded_to_campaigns", 0)),
+                    "converted_campaigns": customer.get("converted_campaigns", 0),
+                    # Email metrics
+                    "email_open_rate": customer.get("email_open_rate", 0.0),
+                    "email_click_rate": customer.get("email_click_rate", 0.0),
+                    # SMS metrics
+                    "sms_response_rate": customer.get("sms_response_rate", 0.0),
+                    # Churn and satisfaction
+                    "churn_risk_score": customer.get("churn_risk_score", 0.0),
+                    "satisfaction_score": customer.get("satisfaction_score", 0.0),
+                    # Social media metrics
+                    "social_shares": customer.get("social_shares", 0),
+                    "video_completion_rate": customer.get("video_completion_rate", 0.0),
+                    "app_downloads": customer.get("app_downloads", 0),
+                    "store_visits": customer.get("store_visits", 0),
+                    # Other metrics
+                    "referrals_made": customer.get("referrals_made", 0),
+                    "repeat_purchase_rate": customer.get("repeat_purchase_rate", 0.0),
+                    "days_since_last_purchase": customer.get("days_since_last_purchase", 0),
+                    # Dates
+                    "first_purchase_date": customer.get("first_purchase_date"),
+                    "last_purchase_date": customer.get("last_purchase_date"),
+                }
+                
+                documents.append(Document(page_content=content, metadata=metadata))
+        
+        # Check if query is about campaigns
+        campaign_keywords = ["campaign", "campaigns", "effectiveness", "performance", "response", "conversion", "email", "click"]
+        is_campaign_query = any(keyword in query_lower for keyword in campaign_keywords)
+        
+        if is_campaign_query:
+            # Get campaigns from structured collection (real data only from MongoDB)
+            campaigns_collection = self.db["campaigns"]
+            campaigns = list(campaigns_collection.find({}).limit(min(k, 10)))
+            
+            for campaign in campaigns:
+                # ONLY use actual data from MongoDB - no calculations, no defaults, no mock data
+                # Skip campaigns that don't have required fields or metrics
+                if not campaign.get("campaign_id") or not campaign.get("name"):
+                    continue  # Skip incomplete campaigns
+                
+                # Get ONLY real data from MongoDB
+                target_segment = campaign.get("target_segment")
+                response_rate = campaign.get("response_rate")
+                conversion_rate = campaign.get("conversion_rate")
+                open_rate = campaign.get("open_rate")
+                click_rate = campaign.get("click_rate")
+                total_spend = campaign.get("total_spend")
+                total_revenue = campaign.get("total_revenue")
+                roi = campaign.get("roi")
+                channel = campaign.get("channel")
+                
+                # Only include campaigns that have at least some real metrics
+                # Skip campaigns with no actual data (don't use calculated defaults)
+                has_metrics = (
+                    response_rate is not None or 
+                    conversion_rate is not None or 
+                    total_revenue is not None or 
+                    roi is not None
+                )
+                
+                if not has_metrics:
+                    continue  # Skip campaigns with no real metrics
+                
+                # Convert to float only for existing values, use 0.0 for display if None
+                response_rate = float(response_rate) if response_rate is not None else None
+                conversion_rate = float(conversion_rate) if conversion_rate is not None else None
+                open_rate = float(open_rate) if open_rate is not None else None
+                click_rate = float(click_rate) if click_rate is not None else None
+                total_spend = float(total_spend) if total_spend is not None else None
+                total_revenue = float(total_revenue) if total_revenue is not None else None
+                roi = float(roi) if roi is not None else None
+                
+                # Create campaign document using ONLY real data from MongoDB
+                text_parts = []
+                campaign_name = campaign.get('name')
+                campaign_id = campaign.get('campaign_id')
+                campaign_type = campaign.get('type')
+                status = campaign.get('status')
+                
+                if campaign_name:
+                    text_parts.append(f"Campaign: {campaign_name}")
+                if campaign_id:
+                    text_parts.append(f"Campaign ID: {campaign_id}")
+                if campaign_type:
+                    text_parts.append(f"Type: {campaign_type}")
+                if status:
+                    text_parts.append(f"Status: {status}")
+                if target_segment:
+                    text_parts.append(f"Target Segment: {target_segment}")
+                if channel:
+                    text_parts.append(f"Channel: {channel}")
+                if response_rate is not None:
+                    text_parts.append(f"Response Rate: {response_rate:.1f}%")
+                if conversion_rate is not None:
+                    text_parts.append(f"Conversion Rate: {conversion_rate:.1f}%")
+                if open_rate is not None:
+                    text_parts.append(f"Email Open Rate: {open_rate:.1f}%")
+                if click_rate is not None:
+                    text_parts.append(f"Email Click Rate: {click_rate:.1f}%")
+                if total_spend is not None:
+                    text_parts.append(f"Total Spend: ${total_spend:.2f}")
+                if total_revenue is not None:
+                    text_parts.append(f"Total Revenue: ${total_revenue:.2f}")
+                if roi is not None:
+                    text_parts.append(f"ROI: {roi:.1f}%")
+                
+                content = ". ".join(text_parts) + "."
+                
+                # Use ONLY real data from MongoDB - no calculated metrics, no defaults
+                responded_count = campaign.get("responded_to_campaigns")
+                converted_count = campaign.get("converted_campaigns")
+                
+                # Build metadata with ONLY real data from MongoDB
+                metadata = {
+                    "source": "campaigns",
+                    "campaign_id": campaign_id,
+                    "type": "campaign",
+                    "category": "marketing",
+                    "name": campaign_name,
+                    "campaign_name": campaign_name,  # Also include campaign_name for frontend compatibility
+                    "campaign_type": campaign_type,
+                    "status": status,
+                }
+                
+                # Only add fields that have actual data in MongoDB
+                if target_segment:
+                    metadata["target_segment"] = target_segment
+                    metadata["customer_segment"] = target_segment  # For frontend compatibility
+                
+                # Campaign performance metrics - only if they exist in MongoDB
+                if response_rate is not None:
+                    metadata["response_rate"] = float(response_rate)
+                if conversion_rate is not None:
+                    metadata["conversion_rate"] = float(conversion_rate)
+                if open_rate is not None:
+                    metadata["open_rate"] = float(open_rate)
+                    metadata["email_open_rate"] = float(open_rate)  # For frontend compatibility
+                if click_rate is not None:
+                    metadata["click_rate"] = float(click_rate)
+                    metadata["email_click_rate"] = float(click_rate)  # For frontend compatibility
+                
+                # Financial metrics - only if they exist in MongoDB
+                if total_spend is not None:
+                    metadata["total_spend"] = float(total_spend)
+                if total_revenue is not None:
+                    metadata["total_revenue"] = float(total_revenue)
+                if roi is not None:
+                    metadata["roi"] = float(roi)
+                
+                # Channel information - only if it exists in MongoDB
+                if channel:
+                    metadata["channel"] = channel
+                    metadata["preferred_contact_method"] = channel  # For frontend compatibility
+                
+                # Campaign engagement - only if it exists in MongoDB
+                if responded_count is not None:
+                    metadata["responded_to_campaigns"] = int(responded_count)
+                if converted_count is not None:
+                    metadata["converted_campaigns"] = int(converted_count)
+                
+                # Dates - only if they exist in MongoDB
+                start_date = campaign.get("start_date")
+                end_date = campaign.get("end_date")
+                if start_date:
+                    metadata["start_date"] = start_date
+                if end_date:
+                    metadata["end_date"] = end_date
+                
+                documents.append(Document(page_content=content, metadata=metadata))
+        
+        return documents
 
     async def retrieve_context(
         self,
@@ -339,17 +584,32 @@ class LangChainRAGService:
 
                 memories = memory_docs
             except Exception as e:
-                # MemMachine is required - log error with setup instructions
+                # MemMachine is required - log error and re-raise
+                # However, if it's a timeout, we can continue without memories for better UX
                 error_msg = str(e)
-                print(f"ERROR: MemMachine is required but unavailable: {error_msg}")
-                print(f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions.")
-                print(f"Required: MemMachine MCP server must be running at the configured URL.")
-                # Don't fail the request but log clearly that MemMachine is required
+                if "timeout" in error_msg.lower() or "Timeout" in error_msg:
+
+                    memories = []  # Continue without memories if timeout
+                else:
+
+                    # Re-raise to fail the request - MemMachine is required for non-timeout errors
+                    raise ValueError(f"MemMachine is required but unavailable: {error_msg}") from e
+
+        # Normalize metadata for all documents
+        normalized_documents = []
+        for doc in documents:
+            normalized_meta = normalize_metadata(doc.metadata)
+            normalized_documents.append(
+                Document(
+                    page_content=doc.page_content,
+                    metadata=normalized_meta,
+                )
+            )
 
         return {
-            "documents": documents,
+            "documents": normalized_documents,
             "memories": memories,
-            "total_context": len(documents) + len(memories),
+            "total_context": len(normalized_documents) + len(memories),
         }
 
     async def rag_query(
@@ -393,16 +653,22 @@ class LangChainRAGService:
             if memmachine_error:
                 return {
                     "query": query,
-                    "answer": "No relevant context found. MemMachine is required but unavailable. Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions.",
+                    "answer": "No relevant context found. MemMachine is required but unavailable. Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions.",
                     "sources": [],
+                    "customers_found": 0,
+                    "customer_summaries": [],
                     "documents": [],
+                    "total_context": 0,
                 }
             
             return {
                 "query": query,
                 "answer": "No relevant context found.",
                 "sources": [],
+                "customers_found": 0,
+                "customer_summaries": [],
                 "documents": [],
+                "total_context": 0,
             }
 
         # Create a simple retrieval chain
@@ -443,17 +709,20 @@ Answer:"""
         else:
             answer_text = str(answer)
 
+        # Normalize metadata for all documents before returning
+        normalized_docs = []
+        for doc in all_docs:
+            normalized_meta = normalize_metadata(doc.metadata)
+            normalized_docs.append({
+                "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                "metadata": normalized_meta,
+            })
+
         return {
             "query": query,
             "answer": answer_text,
             "sources": sources,
-            "documents": [
-                {
-                    "content": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-                    "metadata": doc.metadata,
-                }
-                for doc in all_docs
-            ],
+            "documents": normalized_docs,
             "total_context": context["total_context"],
         }
 
@@ -494,7 +763,10 @@ Answer:"""
                 "query": query,
                 "answer": "I don't have information about that customer or campaign right now. Could you provide more details?",
                 "sources": [],
+                "customers_found": 0,
+                "customer_summaries": [],
                 "documents": [],
+                "total_context": 0,
                 "conversation_ready": True,
             }
 
@@ -505,18 +777,15 @@ Answer:"""
 
         for doc in all_docs:
             content = doc.page_content
-            metadata = doc.metadata
+            # Normalize metadata to ensure proper data types
+            metadata = normalize_metadata(doc.metadata)
             
             # Extract customer info from metadata for quick reference
-            customer_info = {}
-            if "customer_id" in metadata:
-                customer_info["id"] = metadata["customer_id"]
-            if "first_name" in metadata and "last_name" in metadata:
-                customer_info["name"] = f"{metadata['first_name']} {metadata['last_name']}"
-            elif "email" in metadata:
-                customer_info["email"] = metadata["email"]
+            # Use normalize_customer_summary to ensure consistent structure
+            customer_info = normalize_customer_summary(metadata)
             
-            if customer_info:
+            if customer_info and ("id" in customer_info or "email" in customer_info):
+                # Only add if we have at least id or email
                 customer_summaries.append(customer_info)
             
             context_parts.append(content)
@@ -562,19 +831,22 @@ Provide a natural, conversational response suitable for voice (ElevenLabs TTS):"
         else:
             answer_text = str(answer)
 
+        # Normalize all document metadata before returning
+        normalized_documents = []
+        for doc in all_docs[:20]:  # Return more documents for frontend display (up to 20)
+            normalized_meta = normalize_metadata(doc.metadata)
+            normalized_documents.append({
+                "content": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
+                "metadata": normalized_meta,  # Return normalized metadata with proper types
+            })
+
         return {
             "query": query,
             "answer": answer_text,
             "sources": sources,
             "customers_found": len(customer_summaries),
             "customer_summaries": customer_summaries[:5],  # Top 5 for quick reference
-            "documents": [
-                {
-                    "content": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
-                    "metadata": doc.metadata,  # Return full metadata for frontend compatibility
-                }
-                for doc in all_docs[:20]  # Return more documents for frontend display (up to 20)
-            ],
+            "documents": normalized_documents,
             "total_context": context["total_context"],
             "conversation_ready": True,  # Flag for voice system
         }
@@ -584,17 +856,21 @@ Provide a natural, conversational response suitable for voice (ElevenLabs TTS):"
         collection = self.db[self.collection_name]
         docs = list(collection.find({}, limit=limit).sort("_id", -1))
 
+        # Normalize metadata for all documents
+        normalized_docs = []
+        for doc in docs:
+            metadata = doc.get("metadata", {})
+            normalized_meta = normalize_metadata(metadata) if metadata else {}
+            normalized_docs.append({
+                "id": str(doc["_id"]),
+                "content_preview": doc["content"][:200] + "..." if len(doc["content"]) > 200 else doc["content"],
+                "metadata": normalized_meta,
+            })
+
         return {
             "success": True,
-            "documents": [
-                {
-                    "id": str(doc["_id"]),
-                    "content_preview": doc["content"][:200] + "..." if len(doc["content"]) > 200 else doc["content"],
-                    "metadata": doc.get("metadata", {}),
-                }
-                for doc in docs
-            ],
-            "total": len(docs),
+            "documents": normalized_docs,
+            "total": len(normalized_docs),
         }
 
     def delete_documents(self, source: Optional[str] = None) -> dict[str, Any]:

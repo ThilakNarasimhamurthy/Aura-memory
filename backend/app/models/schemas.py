@@ -56,3 +56,33 @@ class LangGraphRAGRequest(BaseModel):
     k: int = Field(5, ge=1, le=10, description="Number of documents to retrieve")
     user_id: Optional[str] = Field(None, description="User ID for MemMachine")
 
+
+# Email Models
+class EmailRecipient(BaseModel):
+    """Email recipient model."""
+
+    email: str = Field(..., description="Recipient email address")
+    customer_id: Optional[str] = Field(None, description="Customer ID (optional)")
+    name: Optional[str] = Field(None, description="Recipient name (optional)")
+    personalization: Optional[dict[str, Any]] = Field(None, description="Personalization data (optional)")
+
+
+class BulkEmailRequest(BaseModel):
+    """Request model for sending bulk emails."""
+
+    recipients: list[EmailRecipient] = Field(..., description="List of email recipients")
+    subject: str = Field(..., description="Email subject")
+    body: str = Field(..., description="Email body (HTML or plain text)")
+    campaign_id: Optional[str] = Field(None, description="Campaign ID (optional)")
+    campaign_name: Optional[str] = Field(None, description="Campaign name (optional)")
+
+
+class EmailStatusResponse(BaseModel):
+    """Response model for email status."""
+
+    success: bool = Field(..., description="Whether the request was successful")
+    message_id: str = Field(..., description="Email message ID")
+    status: str = Field(..., description="Email status (sent, delivered, opened, etc.)")
+    recipient: Optional[str] = Field(None, description="Recipient email address")
+    timestamp: Optional[str] = Field(None, description="Timestamp when email was sent")
+

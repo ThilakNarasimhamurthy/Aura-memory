@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Configuration values sourced from environment variables or a `.env` file."""
 
     app_name: str = Field(
-        "ELL Backend",
+        "Aura Memory Backend",
         alias="APP_NAME",
         validation_alias="APP_NAME",
         description="Human readable service name.",
@@ -24,13 +24,13 @@ class Settings(BaseSettings):
         description="MongoDB connection string.",
     )
     mongodb_database: str = Field(
-        "ell_db",
+        "aura_memory_db",
         alias="MONGODB_DATABASE",
         validation_alias="MONGODB_DATABASE",
         description="Default MongoDB database name.",
     )
     memmachine_mcp_url: str = Field(
-        "http://localhost:8080",
+        "http://localhost:8090",
         alias="MEMMACHINE_MCP_URL",
         validation_alias="MEMMACHINE_MCP_URL",
         description="MemMachine MCP server URL.",

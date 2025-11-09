@@ -113,7 +113,7 @@ export LLM_MODEL="gpt-4o-mini"  # or "claude-3-haiku"
 
 For MemMachine:
 ```bash
-export MEMMACHINE_MCP_URL="http://localhost:8080"
+export MEMMACHINE_MCP_URL="http://localhost:8081"
 export MEMMACHINE_USER_ID="default-user"
 ```
 

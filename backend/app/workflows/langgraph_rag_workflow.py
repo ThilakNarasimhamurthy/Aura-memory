@@ -12,7 +12,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.services.langchain_rag_service import LangChainRAGService
 from app.services.memmachine_client import MemMachineMCPClient
 
-
 class RAGState(TypedDict):
     """State for RAG workflow."""
 
@@ -24,7 +23,6 @@ class RAGState(TypedDict):
     sources: list[str]
     user_id: Optional[str]
     k: int
-
 
 class LangGraphRAGWorkflow:
     """LangGraph workflow for RAG pipeline with multiple stages."""
@@ -145,7 +143,7 @@ class LangGraphRAGWorkflow:
 
             state["memories"] = memories
         except Exception as e:
-            print(f"Warning: Failed to retrieve memories: {e}")
+
             state["memories"] = []
 
         return state

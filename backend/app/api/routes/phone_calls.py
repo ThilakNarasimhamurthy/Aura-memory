@@ -20,13 +20,12 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/phone-call", tags=["Phone Calls"])
 
-
 class InitiateCallRequest(BaseModel):
     """Request model for initiating a phone call."""
     phone_number: str
     customer_name: Optional[str] = None
     customer_id: Optional[str] = None
-
+    script_text: Optional[str] = None  # Optional script/transcript to use for the call
 
 @router.post("/initiate", summary="Initiate a phone call to a customer")
 async def initiate_phone_call(
@@ -57,16 +56,38 @@ async def initiate_phone_call(
         )
     
     try:
-        # Get phone service
+        # Get phone service (this will raise ValueError if credentials are missing)
         phone_service = get_phone_call_service()
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Twilio package is not installed. Install it with: pip install twilio. Error: {str(e)}"
+        )
+    except ValueError as e:
+        # This happens when Twilio credentials are missing
+        raise HTTPException(
+            status_code=503,
+            detail=f"Twilio credentials not configured. Please set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in your .env file. Error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to initialize Twilio service: {str(e)}"
+        )
+    
+    try:
         
         # Extract request data
         phone_number = request.phone_number
         customer_name = request.customer_name
         customer_id = request.customer_id
+        script_text = request.script_text  # Use provided script if available
         
-        # Generate call script
-        if customer_id:
+        # Use provided script, or generate one if not provided
+        if script_text and script_text.strip():
+            # Use the provided script/transcript (may be edited by user)
+            script = script_text.strip()
+        elif customer_id:
             # Fetch customer data and generate personalized script
             query = f"Generate a phone conversation script to call customer {customer_id} ({customer_name or ''}) at {phone_number} to ask about campaign effectiveness."
             result = await rag_service.campaign_conversation_query(
@@ -120,7 +141,6 @@ Thank you for your time and feedback!"""
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
-
 
 @router.post("/twiml", summary="TwiML webhook for call handling")
 @router.get("/twiml", summary="TwiML webhook for call handling (GET fallback)")
@@ -189,7 +209,6 @@ First, have you received any marketing communications from us recently, such as 
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate TwiML: {str(e)}")
-
 
 @router.post("/handle-input", summary="Handle customer input during call")
 async def handle_call_input(
@@ -284,7 +303,7 @@ Summarize what we learned and thank them. Keep it brief (under 15 words)."""
                 sentences = response_text.split('.')
                 response_text = sentences[0] if sentences else response_text[:50]
         except Exception as e:
-            print(f"Error generating RAG response: {e}")
+
             # Fallback responses
             if question_count == 0:
                 response_text = "That's great to hear. Did any of our recent marketing campaigns influence your purchasing decisions?"
@@ -325,7 +344,7 @@ Summarize what we learned and thank them. Keep it brief (under 15 words)."""
         return Response(content=twiml, media_type="application/xml")
 
     except Exception as e:
-        print(f"Error handling call input: {e}")
+
         # Fallback response
         phone_service = get_phone_call_service()
         twiml = phone_service.generate_twiml_response(
@@ -333,7 +352,6 @@ Summarize what we learned and thank them. Keep it brief (under 15 words)."""
             gather_input=False,
         )
         return Response(content=twiml, media_type="application/xml")
-
 
 @router.get("/status/{call_sid}", summary="Get call status")
 async def get_call_status(
@@ -353,7 +371,6 @@ async def get_call_status(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get call status: {str(e)}")
-
 
 @router.get("/conversation/{call_sid}", summary="Get conversation history from a call")
 async def get_call_conversation(
@@ -391,7 +408,6 @@ async def get_call_conversation(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get conversation: {str(e)}")
 
-
 @router.post("/webhook", summary="Twilio webhook for call status updates")
 async def twilio_webhook(
     request: Request,
@@ -401,30 +417,24 @@ async def twilio_webhook(
     
     Twilio will POST to this endpoint when call status changes.
     """
-    if not TWILIO_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Twilio not available")
+    phone_service = get_phone_call_service()
+    form_data = await request.form()
+    call_sid = form_data.get("CallSid", "")
+    call_status = form_data.get("CallStatus", "")
+    call_duration = form_data.get("CallDuration", "0")
     
-    try:
-        phone_service = get_phone_call_service()
-        form_data = await request.form()
-        call_sid = form_data.get("CallSid", "")
-        call_status = form_data.get("CallStatus", "")
-        call_duration = form_data.get("CallDuration", "0")
-        
-        # Update call status in active calls
-        if call_sid in phone_service.active_calls:
-            phone_service.active_calls[call_sid]["status"] = call_status
-            phone_service.active_calls[call_sid]["duration"] = call_duration
-        
-        # Store call results
-        # In production, save to database
-        
-        return {
-            "success": True,
-            "call_sid": call_sid,
-            "status": call_status,
-            "duration": call_duration,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process webhook: {str(e)}")
+    # Update call status in active calls
+    if call_sid in phone_service.active_calls:
+        phone_service.active_calls[call_sid]["status"] = call_status
+        phone_service.active_calls[call_sid]["duration"] = call_duration
+    
+    # Store call results
+    # In production, save to database
+    
+    return {
+        "success": True,
+        "call_sid": call_sid,
+        "status": call_status,
+        "duration": call_duration,
+    }
 

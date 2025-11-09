@@ -6,9 +6,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { TrendingUp, Target, Loader2, RefreshCw, Volume2 } from "lucide-react";
+import { TrendingUp, Target, Loader2, RefreshCw } from "lucide-react";
 import { campaignsApi } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
 
 interface Campaign {
   campaign_name: string;
@@ -30,137 +31,186 @@ export default function Campaigns() {
   const [effectivenessData, setEffectivenessData] = useState<string>("");
   const { toast } = useToast();
 
-  const loadCampaignData = async () => {
+  const loadCampaignData = async (forceRefresh: boolean = false) => {
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cachedCampaigns = getCachedData<Campaign[]>('campaigns_list');
+      const cachedChannelData = getCachedData<any[]>('campaigns_channel');
+      const cachedSegmentData = getCachedData<any[]>('campaigns_segment');
+      const cachedEffectiveness = getCachedData<string>('campaigns_effectiveness');
+      
+      if (cachedCampaigns && cachedChannelData && cachedSegmentData) {
+        setCampaigns(cachedCampaigns);
+        setChannelData(cachedChannelData);
+        setSegmentData(cachedSegmentData);
+        if (cachedEffectiveness) {
+          setEffectivenessData(cachedEffectiveness);
+        }
+        setLoading(false);
+        return;
+      }
+    }
+    
     setLoading(true);
     try {
+      // Get revenue by channel and segment from backend APIs
+      const [channelResponse, segmentResponse, effectivenessResponse] = await Promise.all([
+        campaignsApi.getRevenueByChannel(),
+        campaignsApi.getRevenueBySegment(),
+        campaignsApi.getEffectiveness()
+      ]);
+
+      // Set revenue by channel data
+      let channelArr: any[] = [];
+      if (channelResponse && channelResponse.length > 0) {
+        channelArr = channelResponse.map((channel: any) => ({
+          name: channel.name || "Unknown",
+          revenue: channel.revenue || 0,
+          avgROI: channel.roi || 0,
+        }));
+        setChannelData(channelArr);
+      } else {
+        setChannelData([]);
+      }
+
+      // Set revenue by segment data
+      let segmentArr: any[] = [];
+      if (segmentResponse && segmentResponse.length > 0) {
+        segmentArr = segmentResponse.map((segment: any) => ({
+          name: segment.name || "Unknown",
+          value: segment.value || segment.revenue || 0,
+        }));
+        setSegmentData(segmentArr);
+      } else {
+        setSegmentData([]);
+      }
+
       // Get campaign effectiveness from backend
-      const response = await campaignsApi.getEffectiveness();
+      const response = effectivenessResponse;
       
       // Ensure response is valid
       if (!response) {
         setEffectivenessData("Unable to load campaign data. Please try again.");
-        setChannelData([]);
-        setSegmentData([]);
         setCampaigns([]);
+        if (forceRefresh) {
+          toast({
+            title: "No Campaign Data",
+            description: "No campaign data found in the database. Please import campaign data first.",
+            variant: "destructive",
+          });
+        }
         return;
       }
       
-      setEffectivenessData(response.answer || "Campaign analysis generated.");
+      const effectivenessText = response.answer || "Campaign analysis generated.";
+      setEffectivenessData(effectivenessText);
 
       // Ensure documents array exists
       const documents = Array.isArray(response.documents) ? response.documents : [];
       
+      // If no documents, show message and return early
       if (documents.length === 0) {
-        setChannelData([]);
-        setSegmentData([]);
         setCampaigns([]);
         toast({
-          title: "No Campaign Data",
-          description: "No customer campaign data found. Please upload customer data first.",
-          variant: "default",
+          title: "No Campaign Data Available",
+          description: "No campaigns found in the database. Please import campaign data to see analytics.",
+          variant: "destructive",
         });
         return;
       }
 
-      // Parse campaign data from response
-      // Extract metrics from the answer and documents
-      const metrics: any = {
-        email: { revenue: 0, roi: 0, count: 0 },
-        sms: { revenue: 0, roi: 0, count: 0 },
-        social: { revenue: 0, roi: 0, count: 0 },
-      };
-
-      documents.forEach((doc) => {
-        const metadata = doc.metadata;
-        const channel = (metadata.preferred_contact_method?.toLowerCase() || "email").split(' ')[0]; // Get first word
-        const revenue = typeof metadata.total_spent === 'number' 
-          ? metadata.total_spent 
-          : parseFloat(String(metadata.total_spent || 0));
-        const converted = typeof metadata.converted_campaigns === 'number'
-          ? metadata.converted_campaigns
-          : parseInt(String(metadata.converted_campaigns || 0), 10);
-        const responded = typeof metadata.responded_to_campaigns === 'number'
-          ? metadata.responded_to_campaigns
-          : parseInt(String(metadata.responded_to_campaigns || 0), 10);
-        const roi = responded > 0 ? (converted / responded) * 100 : 0;
-
-        // Map channel names to our metrics keys
-        const channelKey = channel.includes('email') ? 'email' 
-          : channel.includes('sms') || channel.includes('text') ? 'sms'
-          : channel.includes('social') || channel.includes('facebook') || channel.includes('twitter') ? 'social'
-          : 'email'; // default
-
-        if (metrics[channelKey]) {
-          metrics[channelKey].revenue += revenue;
-          metrics[channelKey].roi += roi;
-          metrics[channelKey].count += 1;
-        }
-      });
-
-      const channelArr = Object.entries(metrics).map(([name, data]: [string, any]) => ({
-        name: name.charAt(0).toUpperCase() + name.slice(1),
-        revenue: data.revenue,
-        avgROI: data.count > 0 ? (data.roi / data.count).toFixed(1) : "0",
-      }));
-      setChannelData(channelArr);
-
-      // Aggregate by segment
-      const segmentMap = new Map();
-      documents.forEach((doc) => {
-        const segment = doc.metadata.customer_segment || "Unknown";
-        const revenue = typeof doc.metadata.total_spent === 'number'
-          ? doc.metadata.total_spent
-          : parseFloat(String(doc.metadata.total_spent || 0));
-        const current = segmentMap.get(segment) || { segment, revenue: 0 };
-        segmentMap.set(segment, {
-          segment,
-          revenue: current.revenue + revenue,
-        });
-      });
-      const segmentArr = Array.from(segmentMap.values()).map(s => ({
-        name: s.segment,
-        value: s.revenue,
-      }));
-      setSegmentData(segmentArr);
-
-      // Create campaign list from documents
-      const campaignList: Campaign[] = documents.slice(0, 20).map((doc, idx) => {
+      // Create campaign list from documents - no limit, show all campaigns
+      const campaignList: Campaign[] = documents.map((doc, idx) => {
         const meta = doc.metadata;
+        
+        // Get campaign name (try multiple fields)
+        const campaign_name = meta.campaign_name || meta.name || `Campaign ${idx + 1}`;
+        
+        // Get channel (try multiple fields)
+        const channel = meta.channel || meta.preferred_contact_method || "Email";
+        
+        // Get customer segment (try multiple fields)
+        const customer_segment = meta.customer_segment || meta.target_segment || "All";
+        
+        // Get conversion rate (use campaign conversion_rate if available, otherwise calculate)
+        let conversion_rate = 0;
+        if (meta.conversion_rate !== undefined && meta.conversion_rate !== null) {
+          conversion_rate = typeof meta.conversion_rate === 'number' 
+            ? meta.conversion_rate / 100  // Convert percentage to decimal
+            : parseFloat(String(meta.conversion_rate)) / 100;
+        } else {
+          // Calculate from responded/converted
         const converted = typeof meta.converted_campaigns === 'number'
           ? meta.converted_campaigns
           : parseInt(String(meta.converted_campaigns || 0), 10);
         const responded = typeof meta.responded_to_campaigns === 'number'
           ? meta.responded_to_campaigns
           : parseInt(String(meta.responded_to_campaigns || 0), 10);
-        const conversion_rate = responded > 0 ? converted / responded : 0;
+          conversion_rate = responded > 0 ? converted / responded : 0;
+        }
+        
+        // Get ROI (use campaign roi if available, otherwise calculate from click_rate)
+        let roi = 0;
+        if (meta.roi !== undefined && meta.roi !== null) {
+          roi = typeof meta.roi === 'number' 
+            ? meta.roi
+            : parseFloat(String(meta.roi || 0));
+        } else {
         const click_rate = typeof meta.email_click_rate === 'number'
           ? meta.email_click_rate
           : parseFloat(String(meta.email_click_rate || 0));
-        const total_spend = typeof meta.total_spent === 'number'
+          roi = click_rate; // Use click rate as ROI proxy
+        }
+        
+        // Get total spend (use campaign total_spend if available)
+        const total_spend = typeof meta.total_spend === 'number'
+          ? meta.total_spend
+          : (typeof meta.total_spent === 'number'
           ? meta.total_spent
-          : parseFloat(String(meta.total_spent || 0));
-        const lifetime_value = typeof meta.lifetime_value === 'number'
+            : parseFloat(String(meta.total_spent || 0)));
+        
+        // Get total revenue (use campaign total_revenue if available)
+        const total_revenue = typeof meta.total_revenue === 'number'
+          ? meta.total_revenue
+          : (typeof meta.lifetime_value === 'number'
           ? meta.lifetime_value
-          : parseFloat(String(meta.lifetime_value || 0));
+            : parseFloat(String(meta.lifetime_value || total_spend)));
         
         return {
-          campaign_name: meta.campaign_name || `Campaign ${idx + 1}`,
-          channel: meta.preferred_contact_method || meta.channel || "Email",
-          customer_segment: meta.customer_segment || "All",
+          campaign_name,
+          channel,
+          customer_segment,
           conversion_rate,
-          roi: click_rate * 100, // Convert to percentage
+          roi,
           total_spend,
-          total_revenue: lifetime_value || total_spend,
+          total_revenue,
         };
       });
       setCampaigns(campaignList);
 
-      toast({
-        title: "Campaign Data Loaded",
-        description: `Analyzed ${response.customers_found} customers' campaign engagement.`,
-      });
+      // Cache the data
+      setCachedData('campaigns_list', campaignList);
+      setCachedData('campaigns_channel', channelArr);
+      setCachedData('campaigns_segment', segmentArr);
+      setCachedData('campaigns_effectiveness', effectivenessText);
+
+      // Show appropriate message based on data availability (only on force refresh)
+      if (forceRefresh) {
+        if (campaignList.length === 0) {
+          toast({
+            title: "No Campaign Data Available",
+            description: "No campaigns found in the database. Please import campaign data to see analytics.",
+            variant: "destructive",
+          });
+        } else {
+          const customerCount = response.customers_found || campaignList.length;
+          toast({
+            title: "Campaign Data Refreshed",
+            description: `Analyzed ${customerCount} campaign${campaignList.length !== 1 ? 's' : ''} with engagement data.`,
+          });
+        }
+      }
     } catch (error: any) {
-      console.error("Error loading campaign data:", error);
       toast({
         title: "Error Loading Campaigns",
         description: error.message || "Failed to load campaign data. Please try again.",
@@ -171,29 +221,10 @@ export default function Campaigns() {
     }
   };
 
-  const playVoiceAnalysis = async () => {
-    try {
-      const audioBlob = await campaignsApi.getEffectiveness().then(() => 
-        campaignsApi.getEffectiveness()
-      );
-      // Note: campaignsApi.getEffectiveness returns text, not audio
-      // We need to use ragApi.campaignVoice for audio
-      toast({
-        title: "Voice Analysis",
-        description: "Use the voice query feature in Campaign Automation for audio responses.",
-      });
-    } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.message,
-        variant: "destructive",
-      });
-    }
-  };
 
   useEffect(() => {
-    loadCampaignData();
-  }, []);
+    loadCampaignData(false); // Don't force refresh on mount
+  }, []); // Empty dependency array - only run on mount
 
   const getROIColor = (roi: number) => {
     if (roi >= 200) return "text-success";
@@ -215,34 +246,24 @@ export default function Campaigns() {
                 <h1 className="text-3xl font-bold text-foreground">Campaign Analytics</h1>
                 <p className="text-muted-foreground">Track performance across all marketing campaigns from RAG system</p>
               </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={playVoiceAnalysis}
-                  variant="outline"
-                  size="sm"
-                >
-                  <Volume2 className="h-4 w-4 mr-2" />
-                  Voice Analysis
-                </Button>
-                <Button
-                  onClick={loadCampaignData}
-                  disabled={loading}
-                  variant="outline"
-                  size="sm"
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Loading...
-                    </>
-                  ) : (
-                    <>
-                      <RefreshCw className="h-4 w-4 mr-2" />
-                      Refresh
-                    </>
-                  )}
-                </Button>
-              </div>
+              <Button
+                onClick={() => loadCampaignData(true)} // Force refresh
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh
+                  </>
+                )}
+              </Button>
             </div>
 
             {effectivenessData && (
@@ -301,7 +322,7 @@ export default function Campaigns() {
                         cx="50%"
                         cy="50%"
                         labelLine={false}
-                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        label={({ name, percent }) => `${name} ${Math.round(percent * 100)}%`}
                         outerRadius={100}
                         fill="#8884d8"
                         dataKey="value"
@@ -344,13 +365,13 @@ export default function Campaigns() {
                         <TableCell>
                           <Badge className="bg-primary/20 text-primary">{campaign.customer_segment}</Badge>
                         </TableCell>
-                        <TableCell>{(campaign.conversion_rate * 100).toFixed(1)}%</TableCell>
+                        <TableCell>{Math.round(campaign.conversion_rate * 100)}%</TableCell>
                         <TableCell className={getROIColor(campaign.roi)}>
-                          {campaign.roi.toFixed(0)}%
+                          {Math.round(campaign.roi)}%
                         </TableCell>
-                        <TableCell>${campaign.total_spend.toFixed(0)}</TableCell>
+                        <TableCell>${Math.round(campaign.total_spend)}</TableCell>
                         <TableCell className="text-success font-semibold">
-                          ${campaign.total_revenue.toFixed(0)}
+                          ${Math.round(campaign.total_revenue)}
                         </TableCell>
                       </TableRow>
                     ))}

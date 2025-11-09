@@ -29,7 +29,7 @@ async def add_memory(
     which can be retrieved later using the search endpoint.
     
     **Note:** MemMachine is required. Ensure the MCP server is running.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         result = await client.add_memory(
@@ -46,7 +46,7 @@ async def add_memory(
             raise HTTPException(
                 status_code=503,
                 detail=f"MemMachine is required but unavailable: {error_msg}. "
-                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+                       f"Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions."
             )
         raise HTTPException(status_code=400, detail=f"Failed to add memory: {error_msg}")
     except Exception as e:
@@ -65,7 +65,7 @@ async def search_memory(
     to retrieve relevant context about the user.
     
     **Note:** MemMachine is required. Ensure the MCP server is running.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         result = await client.search_memory(
@@ -83,7 +83,7 @@ async def search_memory(
             raise HTTPException(
                 status_code=503,
                 detail=f"MemMachine is required but unavailable: {error_msg}. "
-                       f"Please start the MemMachine MCP server. See MemMachine/QUICK_START.md for setup instructions."
+                       f"Please start the MemMachine MCP server. See MemMachine/README.md for setup instructions."
             )
         raise HTTPException(status_code=400, detail=f"Failed to search memory: {error_msg}")
     except Exception as e:
@@ -97,7 +97,7 @@ async def memmachine_health() -> dict[str, Any]:
     
     **Note:** MemMachine is required for this application to function properly.
     If this endpoint returns "disconnected", please start the MemMachine MCP server.
-    See MemMachine/QUICK_START.md for setup instructions.
+    See MemMachine/README.md for setup instructions.
     """
     try:
         async with httpx.AsyncClient(timeout=5.0) as http_client:
@@ -144,7 +144,7 @@ async def memmachine_health() -> dict[str, Any]:
             "status": "disconnected",
             "mcp_url": settings.memmachine_mcp_url,
             "message": f"Failed to connect to MemMachine MCP server at {settings.memmachine_mcp_url}. "
-                      f"Please start the server. See MemMachine/QUICK_START.md for setup instructions.",
+                      f"Please start the server. See MemMachine/README.md for setup instructions.",
             "error": str(e),
         }
     except Exception as e:

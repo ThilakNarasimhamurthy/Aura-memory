@@ -5,13 +5,6 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
-// Import mock data for fallback
-import { 
-  getMockCustomerResponse, 
-  getMockCampaignEffectivenessResponse,
-  isDataEmpty 
-} from './mockData';
-
 export interface ApiResponse<T> {
   success?: boolean;
   data?: T;
@@ -52,16 +45,34 @@ export interface CustomerDocument {
   first_name?: string;
   last_name?: string;
   email?: string;
+  phone?: string;
   customer_segment?: string;
+  loyalty_member?: boolean | string;
+  loyalty_points?: number;
   total_purchases?: number;
   total_spent?: number;
+  avg_order_value?: number;
   lifetime_value?: number;
+  churn_risk_score?: number;
+  favorite_product_category?: string;
+  preferred_category?: string;
+  preferred_contact_method?: string;
   responded_to_campaigns?: number;
+  clicked_campaigns?: number;
   converted_campaigns?: number;
   email_open_rate?: number;
   email_click_rate?: number;
-  churn_risk_score?: number;
+  sms_response_rate?: number;
   satisfaction_score?: number;
+  social_shares?: number;
+  video_completion_rate?: number;
+  app_downloads?: number;
+  store_visits?: number;
+  referrals_made?: number;
+  repeat_purchase_rate?: number;
+  days_since_last_purchase?: number;
+  first_purchase_date?: string;
+  last_purchase_date?: string;
   [key: string]: any;
 }
 
@@ -91,43 +102,85 @@ async function apiRequest<T>(
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
   
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-  if (!response.ok) {
-    let errorDetail = response.statusText;
+  try {
+    // Create AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
     try {
-      const error = await response.json();
-      // FastAPI validation errors have 'detail' field
-      if (error.detail) {
-        if (Array.isArray(error.detail)) {
-          // Pydantic validation errors are arrays
-          errorDetail = error.detail.map((e: any) => 
-            `${e.loc?.join('.')}: ${e.msg}`
-          ).join(', ');
-        } else {
-          errorDetail = error.detail;
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        // Handle 402 Payment Required (ElevenLabs quota exceeded) gracefully
+        if (response.status === 402) {
+          try {
+            const errorData = await response.json();
+            const errorMsg = errorData.detail || "Quota exceeded";
+            throw new Error(errorMsg);
+          } catch (jsonError) {
+            throw new Error("ElevenLabs quota exceeded. The call will still work using Twilio's built-in TTS.");
+          }
         }
-      } else if (error.message) {
-        errorDetail = error.message;
+        
+        let errorDetail = response.statusText;
+        try {
+          const error = await response.json();
+          // FastAPI validation errors have 'detail' field
+          if (error.detail) {
+            if (Array.isArray(error.detail)) {
+              // Pydantic validation errors are arrays
+              errorDetail = error.detail.map((e: any) => 
+                `${e.loc?.join('.')}: ${e.msg}`
+              ).join(', ');
+            } else {
+              errorDetail = error.detail;
+            }
+          } else if (error.message) {
+            errorDetail = error.message;
+          }
+        } catch {
+          // If JSON parsing fails, use status text
+        }
+        
+        throw new Error(errorDetail || `HTTP ${response.status}`);
       }
-    } catch {
-      // If JSON parsing fails, use status text
+
+      // Handle audio responses
+      if (response.headers.get('content-type')?.includes('audio')) {
+        return response.blob() as unknown as T;
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        throw new Error(`Request timeout: ${url} took longer than 30 seconds to respond`);
+      }
+      throw fetchError;
     }
-    throw new Error(errorDetail || `HTTP ${response.status}`);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      if (error.message.includes('fetch') || error.message.includes('Failed to fetch')) {
+        const errorMsg = `Failed to connect to backend at ${API_BASE_URL}. Please ensure the backend server is running and accessible.`;
+        throw new Error(errorMsg);
+      }
+      if (error.message.includes('NetworkError') || error.message.includes('network')) {
+        const errorMsg = `Network error connecting to ${API_BASE_URL}. Check your internet connection and backend server status.`;
+        throw new Error(errorMsg);
+      }
+    }
+    throw error;
   }
-
-  // Handle audio responses
-  if (response.headers.get('content-type')?.includes('audio')) {
-    return response.blob() as unknown as T;
-  }
-
-  return response.json();
 }
 
 // ==================== Document Management ====================
@@ -225,34 +278,31 @@ export const ragApi = {
    * Optimized for voice conversations about campaigns
    */
   campaignQuery: async (request: CampaignQueryRequest): Promise<CampaignQueryResponse> => {
-    try {
-      const response = await apiRequest<CampaignQueryResponse>('/langchain-rag/query/campaign', {
-        method: 'POST',
-        body: JSON.stringify({
-          query: request.query,
-          k: Math.min(request.k || 10, 20), // Backend allows up to 20
-          include_memories: request.include_memories ?? true,
-          user_id: request.user_id,
-        }),
-      });
-      
-      // Check if response is empty and use mock data as fallback
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty data, using mock data fallback');
-        return getMockCustomerResponse(request.k || 10);
-      }
-      
-      return response;
-    } catch (error) {
-      console.warn('API request failed, using mock data fallback:', error);
-      // Use mock data based on query type
-      if (request.query.toLowerCase().includes('campaign') && 
-          (request.query.toLowerCase().includes('effectiveness') || 
-           request.query.toLowerCase().includes('performance'))) {
-        return getMockCampaignEffectivenessResponse();
-      }
-      return getMockCustomerResponse(request.k || 10);
+    const response = await apiRequest<CampaignQueryResponse>('/langchain-rag/query/campaign', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: request.query,
+        k: Math.min(request.k || 10, 20), // Backend allows up to 20
+        include_memories: request.include_memories ?? true,
+        user_id: request.user_id,
+      }),
+    });
+    
+    // Return empty structure if response is empty
+    if (!response || !response.documents || response.documents.length === 0) {
+      return {
+        query: request.query,
+        answer: response?.answer || "No data available",
+        sources: response?.sources || [],
+        customers_found: 0,
+        customer_summaries: [],
+        documents: [],
+        total_context: 0,
+        conversation_ready: false,
+      };
     }
+    
+    return response;
   },
 
   /**
@@ -304,25 +354,52 @@ export const ragApi = {
 export const customersApi = {
   /**
    * Find most active customers
+   * First tries structured data API, falls back to RAG if needed
    */
-  findActive: async (k: number = 10) => {
+  findActive: async (k: number = 10000) => {
     try {
-      const response = await ragApi.campaignQuery({
-        query: 'Who are our most active customers? Show customers with high total purchases, total spent, and lifetime value.',
-        k,
+      // Limit to prevent huge responses that can hang the browser
+      // 1000 customers is a reasonable limit - implement pagination if more needed
+      const safeLimit = Math.min(k, 1000);
+      // Try structured data API first (faster, more reliable)
+      const response = await apiRequest<{
+        success: boolean;
+        customers: CustomerDocument[];
+        total: number;
+      }>(`/api/customers?limit=${safeLimit}`, {
+        method: 'GET',
       });
       
-      // Check if response is empty and use mock data
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty customer data, using mock data fallback');
-        return getMockCustomerResponse(k);
+      if (response.success && response.customers && response.customers.length > 0) {
+        // Convert structured data to RAG-like format for frontend compatibility
+        const result = {
+          query: 'Who are our most active customers?',
+          answer: `Found ${response.customers.length} active customers.`,
+          sources: ['customers'],
+          customers_found: response.customers.length,
+          customer_summaries: response.customers.map(c => ({
+            id: c.customer_id,
+            name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
+            email: c.email,
+          })),
+          documents: response.customers.map(customer => ({
+            content: `${customer.first_name} ${customer.last_name} is a ${customer.customer_segment} customer with ${customer.total_purchases} purchases and $${customer.total_spent} total spent.`,
+            metadata: customer,
+          })),
+          total_context: response.customers.length,
+          conversation_ready: true,
+        };
+        return result;
       }
-      
-      return response;
     } catch (error) {
-      console.warn('Failed to fetch active customers, using mock data fallback:', error);
-      return getMockCustomerResponse(k);
+      // Fallback to RAG query
     }
+    
+    // Fallback to RAG query
+    return ragApi.campaignQuery({
+      query: 'Who are our most active customers? Show customers with high total purchases, total spent, and lifetime value.',
+      k,
+    });
   },
 
   /**
@@ -333,44 +410,20 @@ export const customersApi = {
       ? `What is the campaign engagement for customer ${customerId}? Show response rates, conversion rates, and email metrics.`
       : 'Which customers have the highest campaign engagement? Show response rates and conversion rates.';
     
-    try {
-      const response = await ragApi.campaignQuery({
-        query,
-        k: customerId ? 5 : 10,
-      });
-      
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty engagement data, using mock data fallback');
-        return getMockCustomerResponse(customerId ? 5 : 10);
-      }
-      
-      return response;
-    } catch (error) {
-      console.warn('Failed to fetch campaign engagement, using mock data fallback:', error);
-      return getMockCustomerResponse(customerId ? 5 : 10);
-    }
+    return ragApi.campaignQuery({
+      query,
+      k: customerId ? 5 : 10,
+    });
   },
 
   /**
    * Search customers by query
    */
   search: async (query: string, k: number = 10) => {
-    try {
-      const response = await ragApi.campaignQuery({
-        query: `Find customers: ${query}`,
-        k,
-      });
-      
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty search results, using mock data fallback');
-        return getMockCustomerResponse(k);
-      }
-      
-      return response;
-    } catch (error) {
-      console.warn('Failed to search customers, using mock data fallback:', error);
-      return getMockCustomerResponse(k);
-    }
+    return ragApi.campaignQuery({
+      query: `Find customers: ${query}`,
+      k,
+    });
   },
 };
 
@@ -378,25 +431,179 @@ export const customersApi = {
 
 export const campaignsApi = {
   /**
+   * Get revenue by channel
+   */
+  getRevenueByChannel: async () => {
+    try {
+      const response = await apiRequest<{
+        success: boolean;
+        revenue_by_channel: Array<{
+          name: string;
+          revenue: number;
+          spend: number;
+          count: number;
+          roi: number;
+        }>;
+      }>('/api/analytics/revenue-by-channel', {
+        method: 'GET',
+      });
+      
+      if (response.success && response.revenue_by_channel) {
+        return response.revenue_by_channel;
+      }
+      return [];
+    } catch (error) {
+      return [];
+    }
+  },
+
+  /**
+   * Get revenue by segment
+   */
+  getRevenueBySegment: async () => {
+    try {
+      const response = await apiRequest<{
+        success: boolean;
+        revenue_by_segment: Array<{
+          name: string;
+          value: number;
+          revenue: number;
+          spend: number;
+          campaign_count: number;
+          customer_count: number;
+        }>;
+      }>('/api/analytics/revenue-by-segment', {
+        method: 'GET',
+      });
+      
+      if (response.success && response.revenue_by_segment) {
+        return response.revenue_by_segment;
+      }
+      return [];
+    } catch (error) {
+      return [];
+    }
+  },
+
+  /**
+   * Get AI-predicted campaign performance
+   */
+  getPredictedPerformance: async (campaignType: string = "general", targetSegment: string = "all", channel: string = "all") => {
+    try {
+      const response = await apiRequest<{
+        success: boolean;
+        predictions: {
+          predicted_response_rate: number;
+          predicted_conversion_rate: number;
+          predicted_open_rate: number;
+          predicted_click_rate: number;
+          predicted_roi: number;
+          confidence_score: number;
+          recommendations: string[];
+          optimal_send_time: string;
+          expected_revenue_multiplier: number;
+        };
+        historical_campaigns_analyzed: number;
+        optimal_channel: {
+          channel: string;
+          expected_roi: number;
+        };
+        campaign_context: {
+          campaign_type: string;
+          target_segment: string;
+          channel: string;
+        };
+      }>(`/api/analytics/predict-campaign-performance?campaign_type=${campaignType}&target_segment=${targetSegment}&channel=${channel}`, {
+        method: 'GET',
+      });
+      
+      if (response.success && response.predictions) {
+        return response;
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  },
+
+  /**
    * Get campaign effectiveness analysis
+   * First tries structured data API, falls back to RAG if needed
    */
   getEffectiveness: async () => {
     try {
-      const response = await ragApi.campaignQuery({
-        query: 'How are our campaigns performing? Show response rates, conversion rates, email open rates, and click rates across all customers.',
-        k: 15,
+      // Try structured data API first
+      const response = await apiRequest<{
+        success: boolean;
+        campaigns: Array<{
+          campaign_id: string;
+          name: string;
+          type: string;
+          status: string;
+          target_segment: string;
+          response_rate: number;
+          conversion_rate: number;
+          open_rate: number;
+          click_rate: number;
+        }>;
+        total_campaigns: number;
+      }>('/api/analytics/campaigns', {
+        method: 'GET',
       });
       
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty campaign effectiveness data, using mock data fallback');
-        return getMockCampaignEffectivenessResponse();
-      }
       
-      return response;
+      if (response.success && response.campaigns && response.campaigns.length > 0) {
+        // Convert to RAG-like format
+        return {
+          query: 'How are our campaigns performing?',
+          answer: `Found ${response.campaigns.length} campaigns. Average response rate: ${Math.round(response.campaigns.reduce((sum, c) => sum + c.response_rate, 0) / response.campaigns.length)}%`,
+          sources: ['campaigns'],
+          customers_found: 0,
+          customer_summaries: [],
+          documents: response.campaigns.map(campaign => ({
+                  content: `${campaign.name} is a ${campaign.type} campaign targeting ${campaign.target_segment} customers. Response rate: ${Math.round(campaign.response_rate)}%, Conversion rate: ${Math.round(campaign.conversion_rate)}%`,
+            metadata: {
+              campaign_id: campaign.campaign_id,
+              name: campaign.name,
+              campaign_name: campaign.name,  // Also include campaign_name for frontend
+              type: campaign.type,
+              status: campaign.status,
+              target_segment: campaign.target_segment,
+              customer_segment: campaign.target_segment,  // Also include customer_segment for frontend
+              response_rate: campaign.response_rate,
+              conversion_rate: campaign.conversion_rate,
+              open_rate: campaign.open_rate,
+              click_rate: campaign.click_rate,
+              // Financial metrics
+              total_spend: campaign.total_spend || 0,
+              total_revenue: campaign.total_revenue || 0,
+              roi: campaign.roi || 0,
+              // Channel information
+              channel: campaign.channel || "Email",
+              preferred_contact_method: campaign.channel || "Email",  // For frontend compatibility
+              // Campaign engagement (calculate if not present)
+              responded_to_campaigns: campaign.responded_to_campaigns || Math.round(campaign.response_rate * 10),
+              converted_campaigns: campaign.converted_campaigns || Math.round(campaign.conversion_rate * 10),
+              // Email metrics
+              email_open_rate: campaign.open_rate,
+              email_click_rate: campaign.click_rate,
+              // Dates
+              start_date: campaign.start_date,
+              end_date: campaign.end_date,
+            },
+          })),
+          total_context: response.campaigns.length,
+          conversation_ready: true,
+        };
+      }
     } catch (error) {
-      console.warn('Failed to fetch campaign effectiveness, using mock data fallback:', error);
-      return getMockCampaignEffectivenessResponse();
     }
+    
+    // Fallback to RAG query
+    return ragApi.campaignQuery({
+      query: 'How are our campaigns performing? Show response rates, conversion rates, email open rates, and click rates across all customers.',
+      k: 15,
+    });
   },
 
   /**
@@ -407,44 +614,20 @@ export const campaignsApi = {
       ? `How are ${channel} campaigns performing? Show metrics and customer engagement.`
       : 'How are campaigns performing across different channels? Show email, SMS, and social media performance.';
     
-    try {
-      const response = await ragApi.campaignQuery({
-        query,
-        k: 15,
-      });
-      
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty channel data, using mock data fallback');
-        return getMockCampaignEffectivenessResponse();
-      }
-      
-      return response;
-    } catch (error) {
-      console.warn('Failed to fetch channel performance, using mock data fallback:', error);
-      return getMockCampaignEffectivenessResponse();
-    }
+    return ragApi.campaignQuery({
+      query,
+      k: 15,
+    });
   },
 
   /**
    * Get customer response to campaigns
    */
   getCustomerResponse: async () => {
-    try {
-      const response = await ragApi.campaignQuery({
-        query: 'Which customers are responding best to our campaigns? Show customers with high response rates, conversions, and engagement.',
-        k: 15,
-      });
-      
-      if (isDataEmpty(response)) {
-        console.warn('API returned empty customer response data, using mock data fallback');
-        return getMockCustomerResponse(15);
-      }
-      
-      return response;
-    } catch (error) {
-      console.warn('Failed to fetch customer response, using mock data fallback:', error);
-      return getMockCustomerResponse(15);
-    }
+    return ragApi.campaignQuery({
+      query: 'Which customers are responding best to our campaigns? Show customers with high response rates, conversions, and engagement.',
+      k: 15,
+    });
   },
 };
 
@@ -505,6 +688,7 @@ export interface PhoneCallRequest {
   phone_number: string;
   customer_name?: string;
   customer_id?: string;
+  script_text?: string; // Optional script/transcript to use for the call
 }
 
 export interface PhoneCallResponse {
@@ -543,6 +727,42 @@ export interface CallConversation {
   };
   total_exchanges: number;
 }
+
+// ==================== Memory API ====================
+export const memoriesApi = {
+  /**
+   * Add memory to MemMachine
+   */
+  add: async (content: string, user_id?: string) => {
+    return apiRequest<{
+      success: boolean;
+      result: any;
+    }>('/memories', {
+      method: 'POST',
+      body: JSON.stringify({
+        content,
+        user_id,
+      }),
+    });
+  },
+
+  /**
+   * Search memories in MemMachine
+   */
+  search: async (query: string, limit: number = 5, user_id?: string) => {
+    return apiRequest<{
+      success: boolean;
+      result: any;
+    }>('/memories/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        query,
+        limit,
+        user_id,
+      }),
+    });
+  },
+};
 
 export const phoneCallApi = {
   /**

@@ -1,7 +1,25 @@
-# Environment variables
+# Environment variables and secrets
 .env
 .env.local
 .env.*.local
+.env.*
+*.env
+*.env.*
+.env.backup
+.env.bak
+.env.example.tmp
+
+# API Keys and Secrets (specific file patterns only)
+*secret*.env
+*secret*.txt
+*secret*.json
+*.pem
+*.key
+*.cert
+*.crt
+*.private
+credentials.json
+secrets.json
 
 # Python
 __pycache__/
@@ -28,3 +46,23 @@ Thumbs.db
 # Logs
 *.log
 
+# Backup files
+*.bak
+*.backup
+*~
+
+# Node modules
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# MemMachine configuration with secrets
+MemMachine/configuration.yml
+MemMachine/*.db
+MemMachine/*.db-journal
+*.backup.*
+*.backup.*
+*.backup

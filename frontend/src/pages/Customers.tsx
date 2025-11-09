@@ -9,6 +9,7 @@ import { Search, Loader2, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { customersApi, documentsApi, type CustomerDocument } from "@/lib/api";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
 
 interface Customer {
   customer_id: string;
@@ -32,11 +33,24 @@ export default function Customers() {
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
 
-  const loadCustomers = async () => {
+  const loadCustomers = async (forceRefresh: boolean = false) => {
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cachedCustomers = getCachedData<Customer[]>('customers_list');
+      if (cachedCustomers) {
+        setCustomers(cachedCustomers);
+        setFilteredCustomers(cachedCustomers);
+        setLoading(false);
+        return;
+      }
+    }
+    
     setLoading(true);
     try {
-      // Get active customers from backend
-      const response = await customersApi.findActive(20);
+      // Get active customers from backend - limit to 1000 to prevent browser hanging
+      // TODO: Implement pagination for larger datasets
+      const response = await customersApi.findActive(1000);
+      
       
       // Ensure documents array exists and is valid
       if (!response || !response.documents || response.documents.length === 0) {
@@ -47,8 +61,10 @@ export default function Customers() {
           description: response?.answer || "No customer data available. Please upload customer data first.",
           variant: "default",
         });
+        setLoading(false);
         return;
       }
+      
       
       // Extract customer data from documents
       const customerMap = new Map<string, Customer>();
@@ -115,12 +131,16 @@ export default function Customers() {
       setCustomers(customerList);
       setFilteredCustomers(customerList);
       
-      toast({
-        title: "Customers Loaded",
-        description: `Found ${customerList.length} active customers from the database.`,
-      });
+      // Cache the data
+      setCachedData('customers_list', customerList);
+      
+      if (forceRefresh) {
+        toast({
+          title: "Customers Refreshed",
+          description: `Found ${customerList.length} active customers from the database.`,
+        });
+      }
     } catch (error: any) {
-      console.error("Error loading customers:", error);
       toast({
         title: "Error Loading Customers",
         description: error.message || "Failed to load customers. Please try again.",
@@ -132,8 +152,8 @@ export default function Customers() {
   };
 
   useEffect(() => {
-    loadCustomers();
-  }, []);
+    loadCustomers(false); // Don't force refresh on mount - use cache if available
+  }, []); // Empty dependency array - only run on mount
 
   useEffect(() => {
     if (searchTerm) {
@@ -172,7 +192,7 @@ export default function Customers() {
                 <p className="text-muted-foreground">Manage and analyze customer data from RAG system</p>
               </div>
               <Button
-                onClick={loadCustomers}
+                onClick={() => loadCustomers(true)} // Force refresh
                 disabled={loading}
                 variant="outline"
                 size="sm"
@@ -237,7 +257,7 @@ export default function Customers() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      filteredCustomers.slice(0, 50).map((customer, i) => (
+                      filteredCustomers.map((customer, i) => (
                         <TableRow key={customer.customer_id || i}>
                           <TableCell className="font-medium">
                             {customer.first_name && customer.last_name
@@ -255,13 +275,13 @@ export default function Customers() {
                           </TableCell>
                           <TableCell>{customer.total_purchases || 0}</TableCell>
                           <TableCell className="text-success font-semibold">
-                            ${customer.total_spent?.toFixed(2) || "0.00"}
+                            ${Math.round(customer.total_spent || 0)}
                           </TableCell>
                           <TableCell className="text-success font-semibold">
-                            ${customer.lifetime_value?.toFixed(2) || "0.00"}
+                            ${Math.round(customer.lifetime_value || 0)}
                           </TableCell>
                           <TableCell className={getChurnColor(customer.churn_risk_score || 0)}>
-                            {customer.churn_risk_score ? (customer.churn_risk_score * 100).toFixed(0) + "%" : "N/A"}
+                            {customer.churn_risk_score ? Math.round(customer.churn_risk_score * 100) + "%" : "N/A"}
                           </TableCell>
                           <TableCell>{customer.favorite_product_category || "N/A"}</TableCell>
                           <TableCell>{customer.preferred_contact_method || "N/A"}</TableCell>

@@ -7,9 +7,9 @@ Python FastAPI service configured to connect to MongoDB.
 1. Create a `.env` file in this directory:
 
    ```env
-   APP_NAME=ELL Backend
+   APP_NAME=Aura Memory Backend
    MONGODB_URI=mongodb://localhost:27017
-   MONGODB_DATABASE=ell_db
+   MONGODB_DATABASE=aura_memory_db
    ```
 
 2. Install dependencies:

@@ -32,7 +32,6 @@ except ImportError:
     ElevenLabsService = None
     get_elevenlabs_service = None
 
-
 class CallStatus(str, Enum):
     """Call status enumeration."""
     INITIATED = "initiated"
@@ -43,7 +42,6 @@ class CallStatus(str, Enum):
     NO_ANSWER = "no_answer"
     BUSY = "busy"
     CANCELED = "canceled"
-
 
 class PhoneCallService:
     """Service for making phone calls using Twilio and ElevenLabs TTS."""
@@ -80,9 +78,16 @@ class PhoneCallService:
             )
 
         self.twilio_client = TwilioClient(self.twilio_account_sid, self.twilio_auth_token)
-        self.elevenlabs_service = elevenlabs_service or (
-            get_elevenlabs_service() if ELEVENLABS_AVAILABLE else None
-        )
+        
+        # ElevenLabs is optional - phone calls will work with Twilio's built-in TTS
+        try:
+            self.elevenlabs_service = elevenlabs_service or (
+                get_elevenlabs_service() if ELEVENLABS_AVAILABLE else None
+            )
+        except Exception as e:
+            # If ElevenLabs fails to initialize, continue without it
+
+            self.elevenlabs_service = None
 
         # Store active calls
         self.active_calls: Dict[str, Dict[str, Any]] = {}
@@ -124,8 +129,7 @@ class PhoneCallService:
                 use_audio_file = False  # Set to True if you upload audio to Twilio
                 
             except Exception as e:
-                print(f"Warning: Failed to generate audio with ElevenLabs: {e}")
-                print("Falling back to Twilio's built-in TTS")
+
                 use_audio_file = False
         else:
             use_audio_file = False
@@ -266,7 +270,6 @@ class PhoneCallService:
             response.hangup()
 
         return str(response)
-
 
 def get_phone_call_service(
     elevenlabs_service: Optional[ElevenLabsService] = None,

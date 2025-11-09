@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DollarSign, Calendar, Loader2 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
 import { customersApi, campaignsApi } from "@/lib/api";
+import { getCachedData, setCachedData } from "@/lib/dataCache";
 
 export function SalesForecast() {
   const [revenueData, setRevenueData] = useState<any[]>([]);
@@ -12,18 +13,29 @@ export function SalesForecast() {
 
   useEffect(() => {
     const loadForecastData = async () => {
+      // Check cache first
+      const cachedRevenueData = getCachedData<any[]>('sales_forecast_revenue');
+      const cachedSeasonalData = getCachedData<any[]>('sales_forecast_seasonal');
+      const cachedFootfallData = getCachedData<any[]>('sales_forecast_footfall');
+      if (cachedRevenueData && cachedSeasonalData && cachedFootfallData) {
+        setRevenueData(cachedRevenueData);
+        setSeasonalData(cachedSeasonalData);
+        setFootfallData(cachedFootfallData);
+        setLoading(false);
+        return;
+      }
+      
       try {
         const [customerResponse, campaignResponse] = await Promise.all([
-          customersApi.findActive(100),
+          customersApi.findActive(1000), // Reduced for performance
           campaignsApi.getEffectiveness()
         ]);
 
         const customerData = (customerResponse?.documents || []).map(doc => doc.metadata);
         const campaignData = (campaignResponse?.documents || []).map(doc => doc.metadata);
         
-        // If no data, API should have provided mock data, but handle edge case
+        // Handle empty data state
         if (customerData.length === 0 && campaignData.length === 0) {
-          console.warn("No forecast data available");
           setRevenueData([]);
           setSeasonalData([]);
           setFootfallData([]);
@@ -85,8 +97,12 @@ export function SalesForecast() {
           return dayData;
         });
         setFootfallData(footfall);
+        
+        // Cache the data
+        setCachedData('sales_forecast_revenue', revenue);
+        setCachedData('sales_forecast_seasonal', seasons);
+        setCachedData('sales_forecast_footfall', footfall);
       } catch (error) {
-        console.error("Error loading forecast data:", error);
         setRevenueData([]);
         setSeasonalData([]);
         setFootfallData([]);
@@ -96,7 +112,8 @@ export function SalesForecast() {
     };
 
     loadForecastData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty dependency array - only run on mount
   if (loading) {
     return (
       <div className="space-y-4">

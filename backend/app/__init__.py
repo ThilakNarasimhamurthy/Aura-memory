@@ -1,2 +1,2 @@
-"""ELL Backend Application Package."""
+"""Aura Memory Backend Application Package."""
 

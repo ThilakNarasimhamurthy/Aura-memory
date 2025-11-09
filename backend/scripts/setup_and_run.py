@@ -34,9 +34,9 @@ def ensure_env_file():
     
     if not env_file.exists():
         print("Creating .env file...")
-        env_content = f"""APP_NAME=ELL Backend
+        env_content = f"""APP_NAME=Aura Memory Backend
 MONGODB_URI={default_uri}
-MONGODB_DATABASE=ell_db
+MONGODB_DATABASE=aura_memory_db
 """
         env_file.write_text(env_content)
         print("✓ .env file created")

@@ -1,5 +1,5 @@
 """API routes package."""
 
-from app.api.routes import health, memories, langchain_rag
+from app.api.routes import analytics, customers, email, health, langchain_rag, memories, phone_calls
 
-__all__ = ["health", "memories", "langchain_rag"]
+__all__ = ["analytics", "customers", "email", "health", "langchain_rag", "memories", "phone_calls"]

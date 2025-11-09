@@ -22,8 +22,8 @@ export function Sidebar() {
             <Brain className="h-6 w-6 text-white" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-sidebar-foreground">MemMachine</h1>
-            <p className="text-xs text-muted-foreground">Analytics AI</p>
+            <h1 className="text-lg font-bold text-sidebar-foreground">Aura Memory</h1>
+            <p className="text-xs text-muted-foreground">AI Marketing Analytics</p>
           </div>
         </div>
       </div>
@@ -59,7 +59,7 @@ export function Sidebar() {
           </div>
           <div className="flex-1">
             <p className="text-sm font-medium text-sidebar-foreground">Admin User</p>
-            <p className="text-xs text-muted-foreground">admin@coffee.ai</p>
+            <p className="text-xs text-muted-foreground">admin@auramemory.ai</p>
           </div>
         </div>
       </div>
